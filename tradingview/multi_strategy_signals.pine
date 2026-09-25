@@ -1,0 +1,362 @@
+//@version=6
+// ============================================================================
+// Multi-Strategy Futures Signals — индикатор для крипто-фьючерсов (Bybit USDT Perp)
+//
+// 10 стратегий голосуют за LONG (+1) / SHORT (-1) / нейтрально (0):
+//   1. Supertrend            — направление Supertrend
+//   2. Parabolic SAR         — цена выше/ниже SAR
+//   3. MACD                  — MACD выше/ниже сигнальной линии
+//   4. CandleTester          — большинство последних N свечей + последняя свеча в ту же сторону
+//   5. CandleTesterMult      — направление последней закрытой свечи старшего таймфрейма
+//   6. Channel Breakout      — последний пробой канала максимумов/минимумов
+//   7. Cross SMA             — быстрая SMA выше/ниже медленной
+//   8. RCI                   — Rank Correlation Index выше/ниже 0
+//   9. Open Close Cross      — EMA(close) выше/ниже EMA(open)
+//  10. EMA                   — тренд EMA 50 / EMA 200
+//
+// Дополнительно (своё):
+//   - фильтры ADX (нет флэта), объёма и тренда EMA 200
+//   - готовые уровни: вход, стоп (ATR или Supertrend), TP1 (перенос в безубыток), TP2
+//   - расчёт объёма позиции и плеча по депозиту и риску на сделку
+//   - сопровождение позиции на истории и мини-статистика (сделки, винрейт, сумма R)
+//   - панель с голосами всех стратегий и алерты
+//
+// Сигнал LONG: голосов "за" >= порога + все включённые фильтры пройдены.
+// Сигнал SHORT: зеркально.
+// Это инструмент анализа, а не гарантия прибыли. Проверяй на истории и демо-счёте.
+// ============================================================================
+indicator("Multi-Strategy Futures Signals", shorttitle = "MSFS", overlay = true, max_lines_count = 500, max_labels_count = 500)
+
+// ───────────────────────────── Входные параметры ─────────────────────────────
+const string G_SIG  = "Сигналы и фильтры"
+const string G_RISK = "Риск и уровни"
+const string G_STR  = "Стратегии"
+const string G_VIS  = "Отображение"
+
+reqVotes   = input.int(7, "Мин. голосов для входа", minval = 1, maxval = 10, group = G_SIG, tooltip = "Сколько стратегий должны согласиться. Если включено меньше стратегий, порог = числу включённых.")
+onlyClosed = input.bool(true, "Сигнал только по закрытой свече", group = G_SIG, tooltip = "Без перерисовки: сигнал появляется после закрытия свечи.")
+useTrend   = input.bool(true, "Фильтр тренда: LONG только выше EMA 200, SHORT только ниже", group = G_SIG)
+useAdx     = input.bool(true, "Фильтр ADX (не торговать во флэте)", group = G_SIG, inline = "adx")
+adxMin     = input.int(20, "мин.", minval = 1, group = G_SIG, inline = "adx")
+useVol     = input.bool(true, "Фильтр объёма (объём > среднего)", group = G_SIG, inline = "vol")
+volMult    = input.float(1.0, "x", minval = 0.1, step = 0.1, group = G_SIG, inline = "vol")
+
+deposit    = input.float(1000.0, "Депозит, USDT", minval = 1, group = G_RISK)
+riskPct    = input.float(1.0, "Риск на сделку, %", minval = 0.1, maxval = 10, step = 0.1, group = G_RISK)
+maxLev     = input.float(10.0, "Макс. плечо (предупреждение)", minval = 1, group = G_RISK)
+slMode     = input.string("ATR", "Стоп-лосс", options = ["ATR", "Supertrend"], group = G_RISK)
+atrLen     = input.int(14, "ATR период", minval = 1, group = G_RISK, inline = "atr")
+atrMult    = input.float(1.5, "множитель", minval = 0.1, step = 0.1, group = G_RISK, inline = "atr")
+tp1R       = input.float(1.0, "TP1 (перенос в безубыток), R", minval = 0.1, step = 0.1, group = G_RISK)
+tp2R       = input.float(2.0, "TP2 (полное закрытие), R", minval = 0.2, step = 0.1, group = G_RISK)
+
+useST   = input.bool(true, "1. Supertrend", group = G_STR, inline = "st")
+stFact  = input.float(3.0, "фактор", minval = 0.1, step = 0.1, group = G_STR, inline = "st")
+stAtr   = input.int(10, "ATR", minval = 1, group = G_STR, inline = "st")
+useSAR  = input.bool(true, "2. Parabolic SAR", group = G_STR, inline = "sar")
+sarStep = input.float(0.02, "шаг", minval = 0.001, step = 0.01, group = G_STR, inline = "sar")
+sarMax  = input.float(0.2, "макс", minval = 0.01, step = 0.01, group = G_STR, inline = "sar")
+useMACD = input.bool(true, "3. MACD", group = G_STR, inline = "macd")
+macdF   = input.int(12, "", minval = 1, group = G_STR, inline = "macd")
+macdS   = input.int(26, "", minval = 1, group = G_STR, inline = "macd")
+macdSig = input.int(9, "", minval = 1, group = G_STR, inline = "macd")
+useCT   = input.bool(true, "4. CandleTester", group = G_STR, inline = "ct")
+ctBars  = input.int(5, "свечей", minval = 2, group = G_STR, inline = "ct")
+useCTM  = input.bool(true, "5. CandleTesterMult", group = G_STR, inline = "ctm")
+ctmTF   = input.timeframe("60", "старший ТФ", group = G_STR, inline = "ctm")
+useCH   = input.bool(true, "6. Channel Breakout", group = G_STR, inline = "ch")
+chLen   = input.int(20, "длина", minval = 2, group = G_STR, inline = "ch")
+useSMA  = input.bool(true, "7. Cross SMA", group = G_STR, inline = "sma")
+smaF    = input.int(9, "", minval = 1, group = G_STR, inline = "sma")
+smaS    = input.int(21, "", minval = 2, group = G_STR, inline = "sma")
+useRCI  = input.bool(true, "8. RCI", group = G_STR, inline = "rci")
+rciLen  = input.int(9, "длина", minval = 3, maxval = 100, group = G_STR, inline = "rci")
+useOC   = input.bool(true, "9. Open Close Cross", group = G_STR, inline = "oc")
+ocLen   = input.int(8, "EMA", minval = 1, group = G_STR, inline = "oc")
+useEMA  = input.bool(true, "10. EMA тренд", group = G_STR, inline = "ema")
+emaF    = input.int(50, "", minval = 1, group = G_STR, inline = "ema")
+emaS    = input.int(200, "", minval = 2, group = G_STR, inline = "ema")
+
+showLabels = input.bool(true, "Метки с уровнями и объёмом", group = G_VIS)
+showLevels = input.bool(true, "Линии вход / SL / TP", group = G_VIS, inline = "lv")
+lineLen    = input.int(30, "длина, баров", minval = 5, group = G_VIS, inline = "lv")
+showST     = input.bool(true, "Линия Supertrend", group = G_VIS)
+showSAR    = input.bool(false, "Точки Parabolic SAR", group = G_VIS)
+showEMA    = input.bool(true, "EMA 50 / 200", group = G_VIS)
+showCH     = input.bool(false, "Границы канала", group = G_VIS)
+colorBars  = input.bool(false, "Красить свечи по итогу голосования", group = G_VIS)
+showDash   = input.bool(true, "Панель голосов", group = G_VIS)
+
+// ───────────────────────────── Цвета ─────────────────────────────
+color cLong  = #26a69a
+color cShort = #ef5350
+color cNeut  = #787b86
+
+// ───────────────────────────── Функции ─────────────────────────────
+// Rank Correlation Index (корреляция рангов цены и времени), -100..100
+rci(float src, int len) =>
+    float d2 = 0.0
+    for i = 0 to len - 1
+        int rankP = 1
+        for j = 0 to len - 1
+            if j != i and src[j] > src[i]
+                rankP += 1
+        int d = (i + 1) - rankP
+        d2 += d * d
+    (1.0 - 6.0 * d2 / (len * (len * len - 1))) * 100.0
+
+candleDir() =>
+    close > open ? 1 : close < open ? -1 : 0
+
+voteText(bool enabled, int v) =>
+    not enabled ? "выкл" : v > 0 ? "▲ LONG" : v < 0 ? "▼ SHORT" : "— нейтр."
+
+voteColor(bool enabled, int v) =>
+    not enabled ? color.new(cNeut, 70) : v > 0 ? color.new(cLong, 20) : v < 0 ? color.new(cShort, 20) : color.new(cNeut, 40)
+
+// ───────────────────────────── Стратегии ─────────────────────────────
+// 1. Supertrend (direction < 0 = восходящий тренд)
+[stLine, stDir] = ta.supertrend(stFact, stAtr)
+int stVote = stDir < 0 ? 1 : -1
+
+// 2. Parabolic SAR
+sar = ta.sar(sarStep, sarStep, sarMax)
+int sarVote = close > sar ? 1 : -1
+
+// 3. MACD
+[macdLine, sigLine, histLine] = ta.macd(close, macdF, macdS, macdSig)
+int macdVote = macdLine > sigLine ? 1 : -1
+
+// 4. CandleTester: большинство из N последних свечей + последняя свеча в ту же сторону
+upCnt = math.sum(close > open ? 1 : 0, ctBars)
+dnCnt = math.sum(close < open ? 1 : 0, ctBars)
+int ctVote = upCnt > dnCnt and close > open ? 1 : dnCnt > upCnt and close < open ? -1 : 0
+
+// 5. CandleTesterMult: последняя ЗАКРЫТАЯ свеча старшего ТФ (без перерисовки)
+int ctmVote = nz(request.security(syminfo.tickerid, ctmTF, candleDir()[1], lookahead = barmerge.lookahead_on))
+
+// 6. Channel Breakout: направление последнего пробоя
+upBound = ta.highest(high, chLen)[1]
+dnBound = ta.lowest(low, chLen)[1]
+var int chVote = 0
+if close > upBound
+    chVote := 1
+else if close < dnBound
+    chVote := -1
+
+// 7. Cross SMA
+smaFast = ta.sma(close, smaF)
+smaSlow = ta.sma(close, smaS)
+int smaVote = smaFast > smaSlow ? 1 : -1
+
+// 8. RCI
+rciVal = rci(close, rciLen)
+int rciVote = rciVal > 0 ? 1 : rciVal < 0 ? -1 : 0
+
+// 9. Open Close Cross
+ocClose = ta.ema(close, ocLen)
+ocOpen  = ta.ema(open, ocLen)
+int ocVote = ocClose > ocOpen ? 1 : -1
+
+// 10. EMA тренд
+emaFast = ta.ema(close, emaF)
+emaSlow = ta.ema(close, emaS)
+int emaVote = close > emaSlow and emaFast > emaSlow ? 1 : close < emaSlow and emaFast < emaSlow ? -1 : 0
+
+// ───────────────────────────── Голосование и фильтры ─────────────────────────────
+int score = (useST ? stVote : 0) + (useSAR ? sarVote : 0) + (useMACD ? macdVote : 0) + (useCT ? ctVote : 0) + (useCTM ? ctmVote : 0) + (useCH ? chVote : 0) + (useSMA ? smaVote : 0) + (useRCI ? rciVote : 0) + (useOC ? ocVote : 0) + (useEMA ? emaVote : 0)
+int enabledCnt = (useST ? 1 : 0) + (useSAR ? 1 : 0) + (useMACD ? 1 : 0) + (useCT ? 1 : 0) + (useCTM ? 1 : 0) + (useCH ? 1 : 0) + (useSMA ? 1 : 0) + (useRCI ? 1 : 0) + (useOC ? 1 : 0) + (useEMA ? 1 : 0)
+int req = math.max(1, math.min(reqVotes, enabledCnt))
+
+[diPlus, diMinus, adx] = ta.dmi(14, 14)
+volAvg = ta.sma(volume, 20)
+atr    = ta.atr(atrLen)
+
+bool adxOk = not useAdx or adx > adxMin
+bool volOk = not useVol or volume > volAvg * volMult
+
+bool longRaw  = score >= req and adxOk and volOk and (not useTrend or close > emaSlow)
+bool shortRaw = score <= -req and adxOk and volOk and (not useTrend or close < emaSlow)
+bool longTrig  = longRaw and not longRaw[1]
+bool shortTrig = shortRaw and not shortRaw[1]
+bool stFlipDn  = stDir > 0 and stDir[1] < 0
+bool stFlipUp  = stDir < 0 and stDir[1] > 0
+bool confirmed = not onlyClosed or barstate.isconfirmed
+
+// ───────────────────────────── Позиция и статистика ─────────────────────────────
+var int   pos      = 0
+var float entry    = na
+var float sl       = na
+var float tp1      = na
+var float tp2      = na
+var float riskUnit = na
+var int   entryBar = na
+var bool  beMoved  = false
+var int   trades   = 0
+var int   wins     = 0
+var float sumR     = 0.0
+
+bool longSig  = false
+bool shortSig = false
+bool slHit    = false
+bool beHit    = false
+bool tpHit    = false
+bool exitHit  = false
+
+if confirmed and pos != 0 and bar_index > entryBar
+    if pos == 1
+        if low <= sl
+            float r = (sl - entry) / riskUnit
+            trades += 1
+            wins += r > 0 ? 1 : 0
+            sumR += r
+            slHit := not beMoved
+            beHit := beMoved
+            pos := 0
+        else if high >= tp2
+            trades += 1
+            wins += 1
+            sumR += tp2R
+            tpHit := true
+            pos := 0
+        else
+            if not beMoved and high >= tp1
+                sl := entry
+                beMoved := true
+            if stFlipDn
+                float r = (close - entry) / riskUnit
+                trades += 1
+                wins += r > 0 ? 1 : 0
+                sumR += r
+                exitHit := true
+                pos := 0
+    else
+        if high >= sl
+            float r = (entry - sl) / riskUnit
+            trades += 1
+            wins += r > 0 ? 1 : 0
+            sumR += r
+            slHit := not beMoved
+            beHit := beMoved
+            pos := 0
+        else if low <= tp2
+            trades += 1
+            wins += 1
+            sumR += tp2R
+            tpHit := true
+            pos := 0
+        else
+            if not beMoved and low <= tp1
+                sl := entry
+                beMoved := true
+            if stFlipUp
+                float r = (entry - close) / riskUnit
+                trades += 1
+                wins += r > 0 ? 1 : 0
+                sumR += r
+                exitHit := true
+                pos := 0
+
+if confirmed and ((longTrig and pos != 1) or (shortTrig and pos != -1))
+    int dir = longTrig ? 1 : -1
+    // Разворот: закрываем противоположную позицию по цене закрытия
+    if pos == -dir
+        float r = dir * (entry - close) / riskUnit
+        trades += 1
+        wins += r > 0 ? 1 : 0
+        sumR += r
+        exitHit := true
+    bool stOk = dir == 1 ? stDir < 0 : stDir > 0
+    float slDist = slMode == "Supertrend" and stOk ? math.max(math.abs(close - stLine), atr * 0.5) : atr * atrMult
+    pos      := dir
+    entry    := close
+    riskUnit := slDist
+    sl       := close - dir * slDist
+    tp1      := close + dir * slDist * tp1R
+    tp2      := close + dir * slDist * tp2R
+    entryBar := bar_index
+    beMoved  := false
+    longSig  := dir == 1
+    shortSig := dir == -1
+
+    float qty      = deposit * riskPct / 100.0 / slDist
+    float notional = qty * close
+    float lev      = notional / deposit
+    color c        = dir == 1 ? cLong : cShort
+
+    if showLevels
+        line.new(bar_index, entry, bar_index + lineLen, entry, color = color.new(color.gray, 0), width = 1)
+        line.new(bar_index, sl, bar_index + lineLen, sl, color = cShort, style = line.style_dashed, width = 1)
+        line.new(bar_index, tp1, bar_index + lineLen, tp1, color = color.new(cLong, 40), style = line.style_dotted, width = 1)
+        line.new(bar_index, tp2, bar_index + lineLen, tp2, color = cLong, style = line.style_dashed, width = 1)
+
+    if showLabels
+        string txt = (dir == 1 ? "LONG" : "SHORT") + "  " + str.tostring(math.abs(score)) + "/" + str.tostring(enabledCnt) + " голосов" +
+             "\nВход: " + str.tostring(entry, format.mintick) +
+             "\nSL: " + str.tostring(sl, format.mintick) +
+             "\nTP1 (БУ): " + str.tostring(tp1, format.mintick) +
+             "\nTP2: " + str.tostring(tp2, format.mintick) +
+             "\nОбъём: " + str.tostring(qty, "#.####") + " (" + str.tostring(notional, "#.##") + " USDT)" +
+             "\nПлечо: от x" + str.tostring(math.max(1.0, math.ceil(lev * 10) / 10.0), "#.#") +
+             (lev > maxLev ? "\n⚠ Плечо выше лимита — уменьши риск" : "")
+        label.new(bar_index, dir == 1 ? low : high, txt, yloc = dir == 1 ? yloc.belowbar : yloc.abovebar, style = dir == 1 ? label.style_label_up : label.style_label_down, color = color.new(c, 10), textcolor = color.white, size = size.small, textalign = text.align_left)
+
+    alert((dir == 1 ? "LONG " : "SHORT ") + syminfo.ticker + " | вход " + str.tostring(entry, format.mintick) + " | SL " + str.tostring(sl, format.mintick) + " | TP1 " + str.tostring(tp1, format.mintick) + " | TP2 " + str.tostring(tp2, format.mintick) + " | голосов " + str.tostring(math.abs(score)) + "/" + str.tostring(enabledCnt), alert.freq_once_per_bar_close)
+
+// ───────────────────────────── Графика ─────────────────────────────
+plot(showST and stDir < 0 ? stLine : na, "Supertrend вверх", color = cLong, style = plot.style_linebr, linewidth = 2)
+plot(showST and stDir > 0 ? stLine : na, "Supertrend вниз", color = cShort, style = plot.style_linebr, linewidth = 2)
+plot(showSAR ? sar : na, "Parabolic SAR", color = color.new(color.orange, 0), style = plot.style_cross, linewidth = 1)
+plot(showEMA ? emaFast : na, "EMA быстрая", color = color.new(color.yellow, 20))
+plot(showEMA ? emaSlow : na, "EMA 200", color = color.new(color.blue, 0), linewidth = 2)
+plot(showCH ? upBound : na, "Канал верх", color = color.new(cLong, 50), style = plot.style_stepline)
+plot(showCH ? dnBound : na, "Канал низ", color = color.new(cShort, 50), style = plot.style_stepline)
+
+plotshape(longSig, "LONG", shape.triangleup, location.belowbar, cLong, size = size.small)
+plotshape(shortSig, "SHORT", shape.triangledown, location.abovebar, cShort, size = size.small)
+plotshape(slHit, "Стоп", shape.xcross, location.abovebar, cShort, text = "SL", size = size.tiny)
+plotshape(beHit, "Безубыток", shape.circle, location.abovebar, cNeut, text = "BE", size = size.tiny)
+plotshape(tpHit, "Тейк", shape.flag, location.abovebar, cLong, text = "TP", size = size.tiny)
+plotshape(exitHit, "Выход", shape.square, location.abovebar, color.orange, text = "EXIT", size = size.tiny)
+
+barcolor(colorBars ? (score >= req ? cLong : score <= -req ? cShort : na) : na)
+
+alertcondition(longSig, "LONG сигнал", "LONG {{ticker}} по {{close}}")
+alertcondition(shortSig, "SHORT сигнал", "SHORT {{ticker}} по {{close}}")
+alertcondition(slHit or tpHit or beHit or exitHit, "Позиция закрыта", "{{ticker}}: позиция закрыта (SL / TP / БУ / выход)")
+
+// ───────────────────────────── Панель ─────────────────────────────
+var table dash = table.new(position.top_right, 2, 17, bgcolor = color.new(#131722, 10), border_color = color.new(cNeut, 60), border_width = 1)
+
+row(int r, string name, bool enabled, int v) =>
+    table.cell(dash, 0, r, name, text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, r, voteText(enabled, v), text_color = color.white, bgcolor = voteColor(enabled, v), text_size = size.small)
+
+if showDash and barstate.islast
+    table.cell(dash, 0, 0, "Стратегия", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 0, "Голос", text_color = color.white, text_size = size.small)
+    row(1, "Supertrend", useST, stVote)
+    row(2, "Parabolic SAR", useSAR, sarVote)
+    row(3, "MACD", useMACD, macdVote)
+    row(4, "CandleTester", useCT, ctVote)
+    row(5, "CandleTesterMult " + ctmTF, useCTM, ctmVote)
+    row(6, "Channel Breakout", useCH, chVote)
+    row(7, "Cross SMA", useSMA, smaVote)
+    row(8, "RCI " + str.tostring(math.round(rciVal)), useRCI, rciVote)
+    row(9, "Open Close Cross", useOC, ocVote)
+    row(10, "EMA тренд", useEMA, emaVote)
+    color sc = score >= req ? cLong : score <= -req ? cShort : cNeut
+    table.cell(dash, 0, 11, "Итог (порог " + str.tostring(req) + ")", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 11, (score > 0 ? "+" : "") + str.tostring(score), text_color = color.white, bgcolor = color.new(sc, 20), text_size = size.small)
+    table.cell(dash, 0, 12, "ADX / объём", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 12, str.tostring(math.round(adx)) + (adxOk ? " ✓" : " ✗") + " / " + (volOk ? "✓" : "✗"), text_color = color.white, bgcolor = adxOk and volOk ? color.new(cLong, 60) : color.new(cShort, 60), text_size = size.small)
+    string state = longRaw ? "LONG — можно входить" : shortRaw ? "SHORT — можно входить" : "Ждать"
+    table.cell(dash, 0, 13, "Сейчас", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 13, state, text_color = color.white, bgcolor = color.new(longRaw ? cLong : shortRaw ? cShort : cNeut, 20), text_size = size.small)
+    string posTxt = pos == 0 ? "нет" : (pos == 1 ? "LONG " : "SHORT ") + str.tostring(entry, format.mintick) + " SL " + str.tostring(sl, format.mintick)
+    table.cell(dash, 0, 14, "Позиция", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 14, posTxt, text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 15, "Сделок / винрейт", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 15, str.tostring(trades) + " / " + (trades > 0 ? str.tostring(math.round(100.0 * wins / trades)) + "%" : "—"), text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 16, "Сумма R", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 16, str.tostring(sumR, "#.##") + "R", text_color = color.white, bgcolor = color.new(sumR >= 0 ? cLong : cShort, 50), text_size = size.small)
