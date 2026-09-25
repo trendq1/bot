@@ -1,0 +1,4 @@
+bot.log
+trades.csv
+__pycache__/
+.env

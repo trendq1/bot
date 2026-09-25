@@ -1,0 +1,52 @@
+{
+  "mode": "paper",
+  "i_understand_live_risk": false,
+
+  "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SUIUSDT",
+              "AVAXUSDT", "LINKUSDT", "HYPEUSDT", "ADAUSDT", "LTCUSDT", "BNBUSDT"],
+
+  "min_cascade_usd": {
+    "BTCUSDT": 1000000,
+    "ETHUSDT": 500000,
+    "SOLUSDT": 200000,
+    "XRPUSDT": 150000,
+    "DOGEUSDT": 150000,
+    "default": 75000
+  },
+  "log_liquidations_from_usd": 25000,
+
+  "indicators": {
+    "interval": "5",
+    "vwap_bars": 48
+  },
+
+  "strategy": {
+    "cascade_window_sec": 60,
+    "settle_sec": 5,
+    "vwap_dev_atr": 2.0,
+    "bounce_atr": 0.15,
+    "sl_buffer_atr": 0.5,
+    "min_sl_pct": 0.3,
+    "max_sl_pct": 3.0,
+    "min_rr": 1.5,
+    "max_rr": 3.0
+  },
+
+  "risk": {
+    "risk_per_trade_pct": 0.5,
+    "max_leverage": 5,
+    "max_open_positions": 3,
+    "max_trades_per_day": 10,
+    "daily_loss_limit_pct": 3,
+    "max_consecutive_losses": 3,
+    "pause_hours": 4,
+    "symbol_cooldown_minutes": 30,
+    "breakeven_at_r": 1.0,
+    "max_hold_minutes": 120
+  },
+
+  "paper": {
+    "balance": 1000,
+    "fee_pct": 0.055
+  }
+}
