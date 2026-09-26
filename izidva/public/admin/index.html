@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Trader · Админ-панель</title>
+<link rel="stylesheet" href="admin.css">
+</head>
+<body>
+<!-- вход -->
+<div class="login" id="loginView" hidden>
+  <h1>🔐 AI Trader</h1>
+  <p class="muted">Вход в админ-панель</p>
+  <div class="card">
+    <label>Логин<input class="inp" id="lUser" autocomplete="username"></label>
+    <label>Пароль<input class="inp" id="lPass" type="password" autocomplete="current-password"></label>
+    <button class="btn primary big" id="lBtn">Войти</button>
+    <div class="note err" id="lErr"></div>
+  </div>
+</div>
+
+<!-- панель -->
+<div class="layout" id="appView" hidden>
+  <aside class="side" id="side">
+    <div class="brand">🤖 AI Trader</div>
+    <nav class="nav" id="nav">
+      <button data-v="overview">📊 Обзор</button>
+      <button data-v="users">👥 Клиенты</button>
+      <button data-v="payments">⭐ Платежи</button>
+      <button data-v="finance">💰 Доходы и расходы</button>
+      <button data-v="trades">📋 Сделки</button>
+      <button data-v="ai">🧠 ИИ и рынок</button>
+      <button data-v="broadcast">📣 Рассылка</button>
+      <button data-v="settings">🔑 Настройки и ключи</button>
+      <button data-v="logs">📜 Журнал</button>
+      <button data-v="admins">🛡 Администраторы</button>
+    </nav>
+    <div class="me"><div id="meName"></div><a href="#" id="logout">Выйти</a></div>
+  </aside>
+  <main class="main">
+    <div class="head">
+      <div class="row"><button class="btn menu-btn" id="menuBtn">☰</button><h2 id="title">Обзор</h2></div>
+      <div class="row" id="headActions"></div>
+    </div>
+    <div id="view"></div>
+  </main>
+</div>
+
+<div class="modal-bg" id="modalBg" hidden></div>
+<div class="modal" id="modal" hidden></div>
+<div class="toast" id="toast" hidden></div>
+<div class="tip" id="tip" hidden></div>
+<script src="admin.js"></script>
+</body>
+</html>

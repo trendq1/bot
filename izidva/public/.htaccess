@@ -1,0 +1,6 @@
+Options -Indexes
+# скрытые файлы (.env, .git) не отдаём
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+DirectoryIndex index.php index.html

@@ -1,0 +1,8 @@
+# Проект можно залить целиком (например в public_html/izidva) — запросы уходят в папку public/,
+# служебные папки закрыты. Для nginx без Apache укажите корнем сайта папку public/.
+Options -Indexes
+RewriteEngine On
+RewriteRule ^(src|storage|bin|migrations|vendor|tests)(/|$) - [F,L]
+RewriteRule (^|/)\.(?!well-known) - [F,L]
+RewriteRule ^public/ - [L]
+RewriteRule ^(.*)$ public/$1 [L]

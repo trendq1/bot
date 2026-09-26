@@ -1,0 +1,9 @@
+storage/.env
+storage/SETUP_CODE.txt
+storage/login_attempts.json
+storage/setup_attempts
+storage/daemon.lock
+storage/logs/*
+!storage/logs/.gitkeep
+/vendor/
+*.zip
