@@ -412,67 +412,82 @@ VIEWS.menu = async () => {
 };
 
 // ───────────── ручная торговля ─────────────
+// Новый ордер трейдера всегда ставится сразу ВСЕМ клиентам, у кого эта монета включена в настройках
+// (никакого выбора «одному клиенту» тут больше нет — см. AdminApi::manualCreate). Выбор клиента остался
+// только в блоке «Автотрейдинг клиента» — там он про режим конкретного клиента, а не про ордера.
 const MN_STATUS = { pending: "в очереди", open: "лимит выставлен", filled: "исполнен", done: "исполнен", cancelled: "отменён",
   cancel_requested: "отмена…", error: "ошибка" };
 const MN_CLASS = { filled: "ok", done: "ok", error: "bad", cancelled: "warn", cancel_requested: "warn" };
 const MN_TYPE = { market: "рынок", limit: "лимит", close: "закрытие" };
-let mnClients = [], mnTimer = null;
+let mnClients = [], mnSymbols = [], mnTimer = null;
 VIEWS.manual = async () => {
   clearInterval(mnTimer);
-  mnClients = await api("/manual/clients");
+  const data = await api("/manual/clients");
+  mnClients = data.clients; mnSymbols = data.symbols;
   if (!mnClients.length) { $("view").innerHTML = `<div class="card muted">Пока нет ни одного клиента.</div>`; return; }
+  const symOpts = mnSymbols.map((s) => `<option value="${s}">${s}</option>`).join("");
   $("view").innerHTML = `
-    <div class="card">
-      <h3>Клиент</h3>
-      <select id="mnClient">${mnClients.map((c) => `<option value="${c.id}">${esc(c.name)}${c.username ? " · @" + esc(c.username) : ""} — ${
-        c.trading_mode === "exchange" ? (c.exchange || "биржа не подключена") : "демо"}${c.running ? "" : " · бот остановлен"}</option>`).join("")}</select>
-      <div id="mnInfo" class="muted small" style="margin-top:8px"></div>
-      <button class="btn" id="mnToggle" style="margin-top:10px"></button>
-    </div>
     <div class="card" style="max-width:680px">
-      <h3>Открытые позиции / сетки клиента</h3>
-      <div id="mnOpen">—</div>
-    </div>
-    <div class="card" style="max-width:680px">
-      <h3>Новый ордер</h3>
+      <h3>Новый ордер — сразу всем клиентам</h3>
+      <div class="muted small" style="margin-bottom:8px">Заявка встанет в очередь каждому незаблокированному клиенту, у которого эта монета включена в его торговых настройках. Своя строка, свой статус на каждого — ошибка у одного не остановит остальных.</div>
       <div class="grid2">
-        <label>Монета<select id="mnSymbol"></select></label>
+        <label>Монета<select id="mnSymbol">${symOpts}</select></label>
         <label>Текущая цена<div class="row"><input class="inp" id="mnPrice0" readonly placeholder="—"><button class="btn" type="button" id="mnRefreshPrice">↻</button></div></label>
       </div>
       <div class="seg" id="mnSide"><button data-v="Buy">🟢 Buy / Long</button><button data-v="Sell">🔴 Sell / Short</button></div>
       <div class="seg" id="mnType"><button data-v="market">По рынку</button><button data-v="limit">Лимит</button></div>
       <div class="grid2">
         <label id="mnPriceWrap" hidden>Цена лимитного ордера<input class="inp" id="mnLimitPrice" type="number" step="any"></label>
-        <label>Объём, монета<input class="inp" id="mnQty" type="number" step="any" placeholder="0.01"></label>
+        <label>Объём, монета (на каждого клиента)<input class="inp" id="mnQty" type="number" step="any" placeholder="0.01"></label>
         <label>Стоп-лосс (необязательно)<input class="inp" id="mnSl" type="number" step="any"></label>
         <label>Тейк-профит (необязательно)<input class="inp" id="mnTp" type="number" step="any"></label>
         <label>Плечо (необязательно)<input class="inp" id="mnLev" type="number" min="1" max="125" placeholder="как сейчас у клиента"></label>
       </div>
-      <label class="row small" style="margin-top:10px;align-items:center;gap:6px"><input type="checkbox" id="mnBroadcast">Открыть у всех клиентов, у кого включена эта монета (не только у выбранного)</label>
-      <button class="btn primary big" id="mnSend" style="margin-top:10px">Отправить ордер</button>
+      <button class="btn primary big" id="mnSend" style="margin-top:10px">Отправить всем клиентам</button>
       <div class="note" id="mnRes"></div>
+    </div>
+    <div class="card" style="max-width:680px">
+      <h3>Закрыть у всех клиентов</h3>
+      <div class="muted small" style="margin-bottom:8px">Закрывает эту монету рынком у каждого клиента, у кого по ней прямо сейчас открыта позиция или сетка.</div>
+      <div class="row" style="gap:8px;align-items:center">
+        <select id="mnCloseSymbol">${symOpts}</select>
+        <button class="btn danger" id="mnCloseAll">Закрыть у всех</button>
+      </div>
+      <div class="note" id="mnCloseRes"></div>
+    </div>
+    <div class="card">
+      <h3>Открытые позиции и сетки — все клиенты</h3>
+      <div id="mnOpen">—</div>
     </div>
     <div class="card">
       <h3 class="row" style="justify-content:space-between;align-items:center">
-        <span>Ордера <span id="mnOrdersScope">этого клиента</span></span>
-        <label class="small muted" style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="mnOrdersAll">показать все</label>
+        <span>Ордера</span>
+        <label class="small muted" style="display:flex;align-items:center;gap:6px">Клиент
+          <select id="mnFilterClient"><option value="0">все</option>${mnClients.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select>
+        </label>
       </h3>
       <div id="mnOrders">—</div>
+    </div>
+    <div class="card">
+      <h3>Автотрейдинг клиента</h3>
+      <select id="mnClient">${mnClients.map((c) => `<option value="${c.id}">${esc(c.name)}${c.username ? " · @" + esc(c.username) : ""} — ${
+        c.trading_mode === "exchange" ? (c.exchange || "биржа не подключена") : "демо"}${c.running ? "" : " · бот остановлен"}</option>`).join("")}</select>
+      <div id="mnInfo" class="muted small" style="margin-top:8px"></div>
+      <button class="btn" id="mnToggle" style="margin-top:10px"></button>
     </div>`;
   const client = () => mnClients.find((c) => c.id === Number($("mnClient").value));
   function renderOpen() {
-    const c = client();
-    const items = c.open || [];
-    $("mnOpen").innerHTML = items.length ? table(["Монета", "Тип", "Сторона", ""], items.map((o) =>
-      `<tr><td>${o.symbol}</td><td>${o.kind === "grid" ? "сетка" : "позиция"}</td>
+    const rows = mnClients.flatMap((c) => (c.open || []).map((o) => ({ ...o, client: c.name, uid: c.id })));
+    $("mnOpen").innerHTML = rows.length ? table(["Клиент", "Монета", "Тип", "Сторона", ""], rows.map((o) =>
+      `<tr><td>${esc(o.client)}</td><td>${o.symbol}</td><td>${o.kind === "grid" ? "сетка" : "позиция"}</td>
         <td class="${o.side === "Sell" ? "neg" : "pos"}">${o.side || "—"}</td>
-        <td><button class="btn danger" data-close="${o.symbol}" data-side="${o.side || "Buy"}">Закрыть</button></td></tr>`))
-      : `<div class="muted small">Нет открытых позиций или сеток</div>`;
-    $("mnOpen").querySelectorAll("[data-close]").forEach((b) => (b.onclick = async () => {
-      const c2 = client();
-      if (!confirm(`Закрыть ${b.dataset.close} у клиента «${c2.name}»?`)) return;
+        <td><button class="btn danger" data-close-uid="${o.uid}" data-close-sym="${o.symbol}" data-close-side="${o.side || "Buy"}">Закрыть</button></td></tr>`))
+      : `<div class="muted small">Ни у кого нет открытых позиций или сеток</div>`;
+    $("mnOpen").querySelectorAll("[data-close-uid]").forEach((b) => (b.onclick = async () => {
+      const c2 = mnClients.find((c) => c.id === Number(b.dataset.closeUid));
+      if (!confirm(`Закрыть ${b.dataset.closeSym} у клиента «${c2.name}»?`)) return;
       try {
-        await post("/manual/close", { user_id: c2.id, symbol: b.dataset.close, side: b.dataset.side });
+        await post("/manual/close", { user_id: c2.id, symbol: b.dataset.closeSym, side: b.dataset.closeSide });
         toast("Заявка на закрытие поставлена в очередь");
         loadOrders();
       } catch (e) { toast(e.message); }
@@ -480,14 +495,10 @@ VIEWS.manual = async () => {
   }
   function renderInfo() {
     const c = client();
-    $("mnSymbol").innerHTML = c.symbols.map((s) => `<option value="${s}">${s}</option>`).join("");
     $("mnInfo").innerHTML = `Режим: <b>${c.manual_mode ? "ручной (автотрейдинг выключен)" : "автотрейдинг"}</b> · бот ${c.running ? "работает" : "остановлен"}` +
       (c.equity != null ? ` · баланс ${usd(c.equity)}` : "") + (c.status ? ` · ${esc(c.status)}` : "");
     $("mnToggle").textContent = c.manual_mode ? "▶ Включить автотрейдинг" : "✋ Выключить автотрейдинг (ручной режим)";
     $("mnToggle").className = "btn " + (c.manual_mode ? "primary" : "danger");
-    $("mnPrice0").value = "";
-    renderOpen();
-    loadOrders();
   }
   $("mnClient").onchange = renderInfo;
   $("mnToggle").onclick = async () => {
@@ -504,36 +515,39 @@ VIEWS.manual = async () => {
   $("mnRefreshPrice").onclick = async () => {
     try { const r = await api("/manual/price?symbol=" + $("mnSymbol").value); $("mnPrice0").value = r.price; } catch (e) { toast(e.message); }
   };
-  $("mnOrdersAll").onchange = () => loadOrders();
+  $("mnFilterClient").onchange = () => loadOrders();
   $("mnSend").onclick = async () => {
-    const c = client();
     const side = $("mnSide").querySelector("button.on").dataset.v;
     const type = $("mnType").querySelector("button.on").dataset.v;
     const qty = Number($("mnQty").value);
-    const broadcast = $("mnBroadcast").checked;
+    const symbol = $("mnSymbol").value;
     if (!qty || qty <= 0) { toast("Укажите объём"); return; }
     if (type === "limit" && !Number($("mnLimitPrice").value)) { toast("Укажите цену лимитного ордера"); return; }
-    const target = broadcast ? `ВСЕМ клиентам, у кого включена ${$("mnSymbol").value}` : `клиенту «${c.name}»`;
-    if (!confirm(`Отправить ${type === "market" ? "рыночный" : "лимитный"} ордер ${side} по ${$("mnSymbol").value} ${target}?`)) return;
+    if (!confirm(`Отправить ${type === "market" ? "рыночный" : "лимитный"} ордер ${side} по ${symbol} ВСЕМ клиентам, у кого она включена?`)) return;
     try {
-      const r = await post("/manual/order", { user_id: c.id, symbol: $("mnSymbol").value, side, order_type: type, qty,
+      const r = await post("/manual/order", { symbol, side, order_type: type, qty,
         price: type === "limit" ? Number($("mnLimitPrice").value) : null,
-        stop_loss: $("mnSl").value || null, take_profit: $("mnTp").value || null, leverage: $("mnLev").value || null,
-        broadcast });
-      $("mnRes").className = "note ok";
-      $("mnRes").textContent = broadcast ? `Ордер поставлен в очередь для ${r.count} клиентов.` : "Ордер поставлен в очередь — движок исполнит его в течение нескольких секунд.";
+        stop_loss: $("mnSl").value || null, take_profit: $("mnTp").value || null, leverage: $("mnLev").value || null });
+      $("mnRes").className = "note ok"; $("mnRes").textContent = `Ордер поставлен в очередь для ${r.count} клиентов.`;
       $("mnQty").value = ""; $("mnSl").value = ""; $("mnTp").value = ""; $("mnLev").value = ""; $("mnLimitPrice").value = "";
       loadOrders();
     } catch (e) { $("mnRes").className = "note err"; $("mnRes").textContent = e.message; }
   };
+  $("mnCloseAll").onclick = async () => {
+    const symbol = $("mnCloseSymbol").value;
+    if (!confirm(`Закрыть ${symbol} у ВСЕХ клиентов, у кого сейчас есть по ней позиция или сетка?`)) return;
+    try {
+      const r = await post("/manual/close", { symbol, broadcast: true });
+      $("mnCloseRes").className = "note ok"; $("mnCloseRes").textContent = `Заявка на закрытие поставлена для ${r.count} клиентов.`;
+      loadOrders();
+    } catch (e) { $("mnCloseRes").className = "note err"; $("mnCloseRes").textContent = e.message; }
+  };
   async function loadOrders() {
-    const c = client();
-    const all = $("mnOrdersAll").checked;
-    $("mnOrdersScope").textContent = all ? "всех клиентов" : "этого клиента";
-    const rows = await api(all ? "/manual/orders" : "/manual/orders?user_id=" + c.id);
-    const cols = ["Когда", ...(all ? ["Клиент"] : []), "Монета", "Сторона", "Тип", "Объём", "Цена / SL / TP", "Плечо", "Статус", "Кто", ""];
+    const uid = Number($("mnFilterClient").value);
+    const rows = await api(uid > 0 ? "/manual/orders?user_id=" + uid : "/manual/orders");
+    const cols = ["Когда", "Клиент", "Монета", "Сторона", "Тип", "Объём", "Цена / SL / TP", "Плечо", "Статус", "Кто", ""];
     $("mnOrders").innerHTML = table(cols, rows.map((o) =>
-      `<tr><td>${dt(o.created_at)}</td>${all ? `<td>${esc(o.client)}</td>` : ""}<td>${o.symbol}</td><td class="${o.side === "Buy" ? "pos" : "neg"}">${o.side}</td><td>${MN_TYPE[o.order_type] || o.order_type}</td>
+      `<tr><td>${dt(o.created_at)}</td><td>${esc(o.client)}</td><td>${o.symbol}</td><td class="${o.side === "Buy" ? "pos" : "neg"}">${o.side}</td><td>${MN_TYPE[o.order_type] || o.order_type}</td>
         <td class="num">${o.order_type === "close" ? "—" : o.qty}</td><td class="num small">${o.order_type === "close" ? "закрытие позиции" : (o.price ?? "рынок")}${o.stop_loss ? " · SL " + o.stop_loss : ""}${o.take_profit ? " · TP " + o.take_profit : ""}</td>
         <td class="num">${o.leverage ? "×" + o.leverage : "—"}</td>
         <td><span class="tag ${MN_CLASS[o.status] || ""}">${MN_STATUS[o.status] || o.status}</span>${o.status === "error" && o.error ? `<div class="muted small">${esc(o.error)}</div>` : ""}</td>
@@ -545,9 +559,11 @@ VIEWS.manual = async () => {
     }));
   }
   renderInfo();
+  renderOpen();
+  loadOrders();
   mnTimer = setInterval(async () => {
     if (current !== "manual") return;
-    try { mnClients = await api("/manual/clients"); renderOpen(); await loadOrders(); } catch (e) {}
+    try { const d = await api("/manual/clients"); mnClients = d.clients; renderOpen(); await loadOrders(); } catch (e) {}
   }, 4000);
 };
 

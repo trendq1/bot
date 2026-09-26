@@ -757,7 +757,12 @@ final class AdminApi
 
     // ───────────── ручная торговля ─────────────
 
-    /** Клиенты для ручной торговли: режим, статус движка, подключённая биржа, монеты, с которыми работает бот. */
+    /**
+     * Клиенты для ручной торговли: режим, статус движка, подключённая биржа, монеты, с которыми работает бот,
+     * и открытые позиции/сетки прямо сейчас (из worker_state.live, публикует демон каждый тик).
+     * symbols — общий список монет платформы (Settings::get('symbols')), из него трейдер выбирает монету
+     * для ордера на всех клиентов — список торгуемых монет самого клиента тут ни при чём.
+     */
     private static function manualClients(): array
     {
         $rows = DB::all("SELECT u.id, u.username, u.first_name, b.running, b.manual_mode, b.trading_mode, b.symbols,
@@ -766,7 +771,7 @@ final class AdminApi
             LEFT JOIN exchange_accounts a ON a.user_id = u.id
             LEFT JOIN worker_state w ON w.user_id = u.id
             WHERE u.blocked = 0 ORDER BY u.id DESC");
-        return array_map(function ($r) {
+        $clients = array_map(function ($r) {
             $live = $r['live'] && $r['updated_at'] && strtotime($r['updated_at'] . ' UTC') > time() - 120
                 ? json_decode((string)$r['live'], true) : null;
             $open = $live ? array_merge(
@@ -779,6 +784,7 @@ final class AdminApi
                 'symbols' => json_decode((string)$r['symbols'], true) ?: [], 'equity' => $r['equity'] !== null ? round((float)$r['equity'], 2) : null,
                 'status' => $r['status'], 'open' => $open];
         }, $rows);
+        return ['clients' => $clients, 'symbols' => Settings::get('symbols')];
     }
 
     /** Включает/выключает ручной режим клиенту: пока включён, автостратегии новых сделок не открывают. */
@@ -810,10 +816,10 @@ final class AdminApi
     }
 
     /**
-     * Новый ручной ордер — становится в очередь manual_orders, исполняет демон (Manager::processManualOrders).
-     * broadcast=true: та же заявка ставится в очередь сразу всем незаблокированным клиентам, у которых эта монета
-     * есть в списке торгуемых, а не только выбранному в форме (каждому — своя строка в manual_orders,
-     * ошибка/отсутствие позиции у одного клиента не мешает остальным).
+     * Новый ручной ордер трейдера. Всегда ставится в очередь manual_orders СРАЗУ ВСЕМ незаблокированным
+     * клиентам, у которых эта монета включена в их торговые настройки, — своя строка на каждого клиента,
+     * своя цена/qty/статус. Исполняет демон (Manager::processManualOrders), ошибка или уже открытая позиция
+     * у одного клиента не мешает остальным.
      */
     private static function manualCreate(array $b, string $admin): array
     {
@@ -847,19 +853,41 @@ final class AdminApi
             'stop_loss' => $sl, 'take_profit' => $tp, 'leverage' => $lev, 'status' => 'pending',
             'created_by' => $admin, 'created_at' => DB::now()];
 
+        $ids = [];
+        foreach (DB::all('SELECT u.id, b.symbols FROM users u JOIN bot_settings b ON b.user_id = u.id WHERE u.blocked = 0') as $r) {
+            if (in_array($symbol, json_decode((string)$r['symbols'], true) ?: [], true)) {
+                $ids[] = DB::insert('manual_orders', ['user_id' => (int)$r['id']] + $row);
+            }
+        }
+        if (!$ids) {
+            Api::fail(400, 'Нет клиентов, у которых эта монета включена в торговые настройки');
+        }
+        self::audit($admin, 'manual.order', "$symbol $side $type qty=$qty · клиентов: " . count($ids));
+        return ['ok' => true, 'ids' => $ids, 'count' => count($ids)];
+    }
+
+    /**
+     * Закрытие открытой позиции/сетки — в очередь manual_orders (order_type=close), исполняет демон.
+     * broadcast=true (symbol обязателен, user_id не нужен): закрывает эту монету у ВСЕХ клиентов, у кого по ней
+     * прямо сейчас есть позиция или сетка. Без broadcast — только у одного клиента (user_id + symbol).
+     */
+    private static function manualClose(array $b, string $admin): array
+    {
+        $symbol = strtoupper(trim((string)($b['symbol'] ?? '')));
+        if (!in_array($symbol, Settings::get('symbols'), true)) {
+            Api::fail(400, 'Неизвестная монета');
+        }
         if (!empty($b['broadcast'])) {
-            $uids = array_column(DB::all('SELECT u.id, b.symbols FROM users u JOIN bot_settings b ON b.user_id = u.id
-                WHERE u.blocked = 0'), 'symbols', 'id');
             $ids = [];
-            foreach ($uids as $uid => $symbolsJson) {
-                if (in_array($symbol, json_decode((string)$symbolsJson, true) ?: [], true)) {
-                    $ids[] = DB::insert('manual_orders', ['user_id' => (int)$uid] + $row);
-                }
+            foreach (self::clientsWithOpenPosition($symbol) as $uid) {
+                $ids[] = DB::insert('manual_orders', ['user_id' => $uid, 'symbol' => $symbol, 'side' => 'Buy', 'order_type' => 'close',
+                    'qty' => 0, 'price' => null, 'stop_loss' => null, 'take_profit' => null, 'leverage' => null,
+                    'status' => 'pending', 'created_by' => $admin, 'created_at' => DB::now()]);
             }
             if (!$ids) {
-                Api::fail(400, 'Нет клиентов, у которых эта монета включена в торговые настройки');
+                Api::fail(400, 'Ни у одного клиента сейчас нет открытой позиции или сетки по этой монете');
             }
-            self::audit($admin, 'manual.order_broadcast', "$symbol $side $type qty=$qty · клиентов: " . count($ids));
+            self::audit($admin, 'manual.close', "$symbol · клиентов: " . count($ids));
             return ['ok' => true, 'ids' => $ids, 'count' => count($ids)];
         }
 
@@ -867,28 +895,36 @@ final class AdminApi
         if (!DB::val('SELECT 1 FROM users WHERE id = ? AND blocked = 0', [$uid])) {
             Api::fail(404, 'Клиент не найден или заблокирован');
         }
-        $id = DB::insert('manual_orders', ['user_id' => $uid] + $row);
-        self::audit($admin, 'manual.order', "клиент $uid: $symbol $side $type qty=$qty");
-        return ['ok' => true, 'id' => $id];
-    }
-
-    /** Закрытие открытой позиции/сетки клиента по рынку — в очередь manual_orders (order_type=close), исполняет демон. */
-    private static function manualClose(array $b, string $admin): array
-    {
-        $uid = (int)($b['user_id'] ?? 0);
-        if (!DB::val('SELECT 1 FROM users WHERE id = ? AND blocked = 0', [$uid])) {
-            Api::fail(404, 'Клиент не найден или заблокирован');
-        }
-        $symbol = strtoupper(trim((string)($b['symbol'] ?? '')));
-        if (!in_array($symbol, Settings::get('symbols'), true)) {
-            Api::fail(400, 'Неизвестная монета');
-        }
         $side = in_array($b['side'] ?? '', ['Buy', 'Sell'], true) ? $b['side'] : 'Buy';
         $id = DB::insert('manual_orders', ['user_id' => $uid, 'symbol' => $symbol, 'side' => $side, 'order_type' => 'close',
             'qty' => 0, 'price' => null, 'stop_loss' => null, 'take_profit' => null, 'leverage' => null,
             'status' => 'pending', 'created_by' => $admin, 'created_at' => DB::now()]);
         self::audit($admin, 'manual.close', "клиент $uid: $symbol");
         return ['ok' => true, 'id' => $id];
+    }
+
+    /** ID незаблокированных клиентов, у которых прямо сейчас (по свежему worker_state.live) есть позиция/сетка по монете. */
+    private static function clientsWithOpenPosition(string $symbol): array
+    {
+        $ids = [];
+        foreach (DB::all("SELECT u.id, w.live, w.updated_at FROM users u JOIN worker_state w ON w.user_id = u.id
+                WHERE u.blocked = 0") as $r) {
+            if (!$r['live'] || !$r['updated_at'] || strtotime($r['updated_at'] . ' UTC') <= time() - 120) {
+                continue;
+            }
+            $live = json_decode((string)$r['live'], true) ?: [];
+            $has = false;
+            foreach (array_merge($live['directional'] ?? [], $live['grids'] ?? []) as $item) {
+                if (($item['symbol'] ?? null) === $symbol) {
+                    $has = true;
+                    break;
+                }
+            }
+            if ($has) {
+                $ids[] = (int)$r['id'];
+            }
+        }
+        return $ids;
     }
 
     /** Журнал ручных ордеров: по клиенту (?user_id=) или общий, для опроса статуса из формы. */
