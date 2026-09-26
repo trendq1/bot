@@ -224,8 +224,10 @@ VIEWS.payments = async () => {
   const rows = await api("/payments");
   const total = rows.reduce((a, p) => a + p.usd, 0), stars = rows.reduce((a, p) => a + p.stars, 0);
   $("view").innerHTML = `<div class="grid kpis">${kpi("Платежей", rows.length)}${kpi("Звёзд", stars)}${kpi("Сумма", usd(total))}</div>
-    <div class="card">${table(["Когда", "Клиент", "Тариф", "⭐", "$", "ID платежа"], rows.map((p) =>
-      `<tr class="click" data-id="${p.user_id}"><td>${dt(p.at)}</td><td>${esc(p.user)}</td><td>${p.plan}</td><td>${p.stars}</td><td>${usd(p.usd)}</td><td class="muted small">${esc(p.charge_id)}</td></tr>`))}</div>`;
+    <div class="card">${table(["Когда", "Клиент", "Тариф", "Способ", "⭐", "$", "ID платежа"], rows.map((p) =>
+      `<tr class="click" data-id="${p.user_id}"><td>${dt(p.at)}</td><td>${esc(p.user)}</td><td>${p.plan}</td>
+        <td><span class="tag ${p.method === "crypto" ? "ok" : ""}">${p.method === "crypto" ? "₿ крипта" : "⭐ звёзды"}</span></td>
+        <td>${p.stars || "—"}</td><td>${usd(p.usd)}</td><td class="muted small">${esc(p.charge_id)}</td></tr>`))}</div>`;
   $("view").querySelectorAll("tr.click").forEach((tr) => (tr.onclick = () => openUser(tr.dataset.id)));
 };
 

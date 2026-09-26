@@ -431,7 +431,8 @@ final class AdminApi
     private static function payments(): array
     {
         return array_map(fn($p) => ['id' => (int)$p['id'], 'user_id' => (int)$p['user_id'], 'user' => $p['first_name'] ?: ($p['username'] ?: $p['user_id']),
-            'plan' => $p['plan'], 'stars' => (int)$p['stars'], 'usd' => (float)$p['usd'], 'charge_id' => $p['charge_id'], 'at' => Api::iso($p['created_at'])],
+            'plan' => $p['plan'], 'method' => $p['method'] ?? 'stars', 'stars' => (int)$p['stars'], 'usd' => (float)$p['usd'],
+            'charge_id' => $p['charge_id'], 'at' => Api::iso($p['created_at'])],
             DB::all('SELECT p.*, u.first_name, u.username FROM payments p JOIN users u ON u.id = p.user_id ORDER BY p.id DESC LIMIT 500'));
     }
 

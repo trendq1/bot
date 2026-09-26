@@ -9,7 +9,7 @@ applyI18n();
 
 const TZ = -new Date().getTimezoneOffset();
 const $ = (id) => document.getElementById(id);
-const state = { me: null, month: new Date(), exMode: "demo", draft: null };
+const state = { me: null, month: new Date(), exMode: "demo", draft: null, payMethod: "stars" };
 const locale = () => (LANG === "ru" ? "ru-RU" : "uk-UA");
 const STRAT = () => ({ grid: t("grid_title"), trend: t("trend_title"), liquidation: t("liquidation_title") });
 const REGIME = () => ({ trend_up: t("regime_trend_up"), trend_down: t("regime_trend_down"), range: t("regime_range"), high_volatility: t("regime_high_volatility") });
@@ -352,9 +352,18 @@ function renderSettings() {
   const u = me.user;
   $("subBadge").textContent = u.has_subscription ? t("sub_until", { date: new Date(u.subscription_until).toLocaleDateString(locale()) }) : t("none");
   $("subBadge").className = "badge" + (u.has_subscription ? " ok" : "");
-  $("plans").innerHTML = me.options.plans.map((p) => `<button class="plan" data-plan="${p.code}"><b>${esc(planTitle[p.code] || p.title)}</b><span>⭐ ${p.stars}</span></button>`).join("");
+  $("plans").innerHTML = me.options.plans.map((p) => `<button class="plan" data-plan="${p.code}"><b>${esc(planTitle[p.code] || p.title)}</b><span>${state.payMethod === "crypto" ? "≈ $" + p.usd : "⭐ " + p.stars}</span></button>`).join("");
   $("plans").querySelectorAll(".plan").forEach((el) => el.addEventListener("click", () => buy(el.dataset.plan)));
+  $("paySeg").hidden = !me.options.crypto_pay;
+  if (me.options.crypto_pay) {
+    $("paySeg").querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.v === state.payMethod));
+  }
 }
+$("paySeg").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+  state.payMethod = b.dataset.v;
+  $("paySeg").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+  renderSettings();
+}));
 
 $("modeSeg").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
   state.draft.trading_mode = b.dataset.v;
@@ -389,8 +398,12 @@ $("disconnectBtn").addEventListener("click", async () => {
 
 async function buy(plan) {
   try {
-    const { link } = await api("/pay", { method: "POST", body: JSON.stringify({ plan }) });
-    if (tg && tg.openInvoice) {
+    const payMethod = state.payMethod || "stars";
+    const { link, method: m } = await api("/pay", { method: "POST", body: JSON.stringify({ plan, method: payMethod }) });
+    if (m === "crypto") {
+      if (tg && tg.openLink) tg.openLink(link); else window.open(link, "_blank");
+      toast(t("crypto_invoice_opened"));
+    } else if (tg && tg.openInvoice) {
       tg.openInvoice(link, async (status) => {
         if (status === "paid") { toast(t("payment_success")); setTimeout(async () => { await loadMe(); renderSettings(); }, 1500); }
       });

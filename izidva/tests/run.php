@@ -34,6 +34,7 @@ use App\Engine\Setups;
 use App\Engine\SymbolFeed;
 use App\Engine\Worker;
 use App\Migrator;
+use App\NowPayments;
 use App\Settings;
 
 $passed = 0;
@@ -247,7 +248,7 @@ test('миграции на пустую базу и повторно', function
     $applied = Migrator::run($pdo);
     check(count($applied) === count(Migrator::files()), 'все миграции');
     check(Migrator::run($pdo) === [], 'повторный запуск ничего не делает');
-    check((int)DB::val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()") === 21, '21 таблица');
+    check((int)DB::val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()") === 22, '22 таблицы');
 });
 test('настройки: секреты шифруются', function () {
     Settings::save(['anthropic_api_key' => 'sk-ant-1234', 'ai_interval_min' => '15', 'symbols' => 'btcusdt, ethusdt', 'require_referral' => 'false']);
@@ -338,6 +339,44 @@ test('синхронизация клиентов с БД', function () {
     DB::update('bot_settings', ['running' => true, 'trading_mode' => 'exchange'], 'user_id = :u', [':u' => 555]);
     $mgr->syncWorkers();
     check(!isset($mgr->workers[555]), 'биржа без ключей и подписки не запускается');
+});
+
+echo "Оплата криптовалютой (NOWPayments)\n";
+test('тарифы содержат usd-эквивалент для крипто-оплаты', function () {
+    $p = Settings::plan('week');
+    check($p['usd'] > 0 && abs($p['usd'] - $p['stars'] * (float)Settings::get('stars_usd_rate')) < 0.01, 'usd считается по курсу звезды из настроек');
+});
+test('подпись IPN проверяется по HMAC-SHA512 отсортированного JSON', function () {
+    Settings::save(['nowpayments_ipn_secret' => 'test-ipn-secret']);
+    $payload = ['order_id' => 'sub-1-week-abcd', 'payment_status' => 'finished', 'price_amount' => 12.5, 'nested' => ['b' => 2, 'a' => 1]];
+    $sortRec = function ($v) use (&$sortRec) {
+        if (!is_array($v)) {
+            return $v;
+        }
+        if (array_is_list($v)) {
+            return array_map($sortRec, $v);
+        }
+        ksort($v);
+        return array_map($sortRec, $v);
+    };
+    $json = json_encode($sortRec($payload), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $sig = hash_hmac('sha512', (string)$json, 'test-ipn-secret');
+    $raw = json_encode($payload);
+    check(NowPayments::verifySignature($raw, $sig), 'верная подпись принимается');
+    check(!NowPayments::verifySignature($raw, str_repeat('0', 128)), 'неверная подпись отклоняется');
+    check(!NowPayments::verifySignature($raw, null), 'отсутствующая подпись отклоняется');
+    check(!NowPayments::verifySignature($raw, 'not-hex'), 'подпись не по формату отклоняется без ошибки');
+    Settings::save(['nowpayments_ipn_secret' => '']);
+});
+test('без ключа NOWPayments инвойс не создаётся', function () {
+    Settings::save(['nowpayments_api_key' => '']);
+    $threw = false;
+    try {
+        NowPayments::createInvoice(['price_amount' => 10, 'price_currency' => 'usd', 'order_id' => 'x']);
+    } catch (\RuntimeException $e) {
+        $threw = true;
+    }
+    check($threw, 'без API-ключа выбрасывается понятная ошибка, а не запрос в сеть');
 });
 
 echo "Ручная торговля трейдера\n";

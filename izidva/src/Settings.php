@@ -31,12 +31,11 @@ final class Settings
         'price_month_stars' => ['int', 750, 'Цена 30 дней, ⭐', 'Тарифы', false, ''],
         'price_quarter_stars' => ['int', 1900, 'Цена 90 дней, ⭐', 'Тарифы', false, ''],
         'stars_usd_rate' => ['float', 0.013, 'Курс 1 ⭐ в $ (для учёта доходов)', 'Тарифы', false, ''],
-        // Только хранение ключей — приём/логика оплаты через 2328 ещё не реализована.
-        'pay2328_enabled' => ['bool', false, 'Оплата через 2328 включена', '2328 (крипто-оплата)', false,
-            'справочный переключатель — саму логику приёма оплаты ещё предстоит реализовать'],
-        'pay2328_api_key' => ['str', '', 'API-ключ 2328', '2328 (крипто-оплата)', true, 'из личного кабинета 2328.io'],
-        'pay2328_api_secret' => ['str', '', 'API-секрет / ключ подписи вебхуков 2328', '2328 (крипто-оплата)', true,
-            'нужен для проверки подписи вебхуков, когда логика будет подключена'],
+        'nowpayments_enabled' => ['bool', false, 'Оплата криптовалютой (NOWPayments) включена', 'NOWPayments (крипта)', false,
+            'показывает клиенту вариант «Оплатить криптой» рядом со звёздами'],
+        'nowpayments_api_key' => ['str', '', 'API-ключ NOWPayments', 'NOWPayments (крипта)', true, 'личный кабинет NOWPayments → API keys'],
+        'nowpayments_ipn_secret' => ['str', '', 'IPN Secret Key NOWPayments', 'NOWPayments (крипта)', true,
+            'личный кабинет → Settings → IPN — нужен для проверки подписи вебхука'],
     ];
 
     private static ?array $cache = null;
@@ -113,10 +112,11 @@ final class Settings
     public static function plans(): array
     {
         $s = self::all();
+        $usd = fn(int $stars) => round($stars * (float)$s['stars_usd_rate'], 2);
         return [
-            ['code' => 'week', 'title' => '7 дней', 'days' => 7, 'stars' => $s['price_week_stars']],
-            ['code' => 'month', 'title' => '30 дней', 'days' => 30, 'stars' => $s['price_month_stars']],
-            ['code' => 'quarter', 'title' => '90 дней', 'days' => 90, 'stars' => $s['price_quarter_stars']],
+            ['code' => 'week', 'title' => '7 дней', 'days' => 7, 'stars' => $s['price_week_stars'], 'usd' => $usd($s['price_week_stars'])],
+            ['code' => 'month', 'title' => '30 дней', 'days' => 30, 'stars' => $s['price_month_stars'], 'usd' => $usd($s['price_month_stars'])],
+            ['code' => 'quarter', 'title' => '90 дней', 'days' => 90, 'stars' => $s['price_quarter_stars'], 'usd' => $usd($s['price_quarter_stars'])],
         ];
     }
 

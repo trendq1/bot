@@ -9,6 +9,7 @@ use App\DB;
 use App\Engine\BybitExchange;
 use App\Engine\Risk;
 use App\Env;
+use App\NowPayments;
 use App\Settings;
 use App\Telegram;
 
@@ -114,6 +115,7 @@ final class MiniApi
                 'symbols' => Settings::get('symbols'), 'profiles' => $profiles, 'plans' => Settings::plans(),
                 'referral_link' => Settings::get('referral_link'), 'support' => Settings::get('support_contact'),
                 'maintenance' => Settings::get('maintenance'),
+                'crypto_pay' => (bool)Settings::get('nowpayments_enabled') && Settings::get('nowpayments_api_key') !== '',
             ],
         ];
     }
@@ -311,6 +313,9 @@ final class MiniApi
         if (!$plan) {
             Api::fail(400, 'Неизвестный тариф');
         }
+        if (($b['method'] ?? 'stars') === 'crypto') {
+            return self::payCrypto($uid, $plan);
+        }
         if (Settings::get('bot_token') === '') {
             Api::fail(503, 'Оплата временно недоступна');
         }
@@ -320,6 +325,31 @@ final class MiniApi
             'payload' => "sub:{$plan['code']}:$uid", 'currency' => 'XTR',
             'prices' => [['label' => $plan['title'], 'amount' => $plan['stars']]],
         ]);
-        return ['link' => $link];
+        return ['link' => $link, 'method' => 'stars'];
+    }
+
+    /** Оплата криптовалютой через NOWPayments: инвойс создаётся сразу, подтверждение — вебхуком (IPN). */
+    private static function payCrypto(int $uid, array $plan): array
+    {
+        if (!Settings::get('nowpayments_enabled') || Settings::get('nowpayments_api_key') === '') {
+            Api::fail(503, 'Оплата криптовалютой временно недоступна');
+        }
+        $usd = (float)$plan['usd'];
+        $orderId = sprintf('sub-%d-%s-%s', $uid, $plan['code'], bin2hex(random_bytes(4)));
+        $base = rtrim((string)Settings::get('webapp_url'), '/');
+        try {
+            $inv = NowPayments::createInvoice([
+                'price_amount' => $usd, 'price_currency' => 'usd', 'order_id' => $orderId,
+                'order_description' => "Подписка AI Trader · {$plan['title']}",
+                'ipn_callback_url' => AdminApi::baseUrl() . '/nowpayments/webhook.php',
+                'success_url' => $base ?: null, 'cancel_url' => $base ?: null,
+            ]);
+        } catch (\Throwable $e) {
+            Api::fail(502, 'NOWPayments: ' . $e->getMessage());
+        }
+        DB::insert('crypto_invoices', ['user_id' => $uid, 'plan' => $plan['code'], 'order_id' => $orderId,
+            'invoice_id' => (string)($inv['id'] ?? ''), 'price_amount' => $usd, 'price_currency' => 'usd',
+            'status' => 'waiting', 'invoice_url' => (string)$inv['invoice_url'], 'created_at' => DB::now()]);
+        return ['link' => $inv['invoice_url'], 'method' => 'crypto'];
     }
 }
