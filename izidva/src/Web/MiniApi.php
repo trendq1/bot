@@ -265,7 +265,8 @@ final class MiniApi
         if (!in_array($symbol, Settings::get('symbols'), true)) {
             Api::fail(400, 'Неизвестная монета');
         }
-        $interval = in_array((string)($_GET['interval'] ?? '5'), ['1', '3', '5', '15', '60'], true) ? (string)$_GET['interval'] : '5';
+        $wantedInterval = (string)($_GET['interval'] ?? '5');
+        $interval = in_array($wantedInterval, ['1', '3', '5', '15', '60'], true) ? $wantedInterval : '5';
         $limit = max(50, min(300, (int)($_GET['limit'] ?? 200)));
         try {
             $r = (new Bybit())->get('/v5/market/kline', ['category' => 'linear', 'symbol' => $symbol, 'interval' => $interval, 'limit' => $limit]);
