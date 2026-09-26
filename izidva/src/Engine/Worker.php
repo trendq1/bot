@@ -247,6 +247,41 @@ final class Worker
         return ['status' => 'done', 'detail' => 'позиция открыта по рынку, вход ~' . self::fmt($price)];
     }
 
+    /**
+     * Закрытие открытой позиции/сетки по кнопке «Закрыть» в админке.
+     * Directional-позицию не убираем из $this->directional здесь — checkDirectional() сам увидит, что она
+     * пропала с биржи, и на следующем тике посчитает и запишет сделку (тот же путь, что и авто-закрытие по таймауту).
+     * @param array{symbol:string} $o
+     * @return array{detail:string}
+     */
+    public function manualClose(array $o): array
+    {
+        $sym = (string)$o['symbol'];
+        if (!in_array($sym, $this->symbols, true)) {
+            throw new \RuntimeException("монета $sym недоступна для этого клиента");
+        }
+        if (isset($this->pendingManual[$sym])) {
+            throw new \RuntimeException("по $sym есть неисполненный лимитный ордер — сначала отмените его");
+        }
+        if (isset($this->grids[$sym])) {
+            $grid = $this->grids[$sym];
+            $price = $this->market->feeds[$sym]->price ?? $grid->plan['center'];
+            $ev = $grid->stop($price);
+            if ($ev) {
+                $this->onGridEvent($sym, $grid, $ev, $this->brain->insights[$sym]['regime'] ?? 'range');
+            }
+            unset($this->grids[$sym]);
+            ($this->notify)($this->userId, "🖐 Трейдер закрыл сетку $sym вручную");
+            return ['detail' => 'сетка закрыта'];
+        }
+        if (isset($this->directional[$sym])) {
+            $this->ex->closePosition($sym);
+            ($this->notify)($this->userId, "🖐 Трейдер закрывает позицию $sym по рынку");
+            return ['detail' => 'заявка на закрытие отправлена на биржу'];
+        }
+        throw new \RuntimeException("по $sym нет открытой позиции для закрытия");
+    }
+
     /** Ждём исполнения лимитных ручных ордеров; при исполнении — в directional, чтобы отследить закрытие как обычно. */
     private function checkPendingManual(array $positions, float $now): void
     {

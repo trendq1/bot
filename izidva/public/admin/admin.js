@@ -415,6 +415,7 @@ VIEWS.menu = async () => {
 const MN_STATUS = { pending: "в очереди", open: "лимит выставлен", filled: "исполнен", done: "исполнен", cancelled: "отменён",
   cancel_requested: "отмена…", error: "ошибка" };
 const MN_CLASS = { filled: "ok", done: "ok", error: "bad", cancelled: "warn", cancel_requested: "warn" };
+const MN_TYPE = { market: "рынок", limit: "лимит", close: "закрытие" };
 let mnClients = [], mnTimer = null;
 VIEWS.manual = async () => {
   clearInterval(mnTimer);
@@ -427,6 +428,10 @@ VIEWS.manual = async () => {
         c.trading_mode === "exchange" ? (c.exchange || "биржа не подключена") : "демо"}${c.running ? "" : " · бот остановлен"}</option>`).join("")}</select>
       <div id="mnInfo" class="muted small" style="margin-top:8px"></div>
       <button class="btn" id="mnToggle" style="margin-top:10px"></button>
+    </div>
+    <div class="card" style="max-width:680px">
+      <h3>Открытые позиции / сетки клиента</h3>
+      <div id="mnOpen">—</div>
     </div>
     <div class="card" style="max-width:680px">
       <h3>Новый ордер</h3>
@@ -443,11 +448,36 @@ VIEWS.manual = async () => {
         <label>Тейк-профит (необязательно)<input class="inp" id="mnTp" type="number" step="any"></label>
         <label>Плечо (необязательно)<input class="inp" id="mnLev" type="number" min="1" max="125" placeholder="как сейчас у клиента"></label>
       </div>
+      <label class="row small" style="margin-top:10px;align-items:center;gap:6px"><input type="checkbox" id="mnBroadcast">Открыть у всех клиентов, у кого включена эта монета (не только у выбранного)</label>
       <button class="btn primary big" id="mnSend" style="margin-top:10px">Отправить ордер</button>
       <div class="note" id="mnRes"></div>
     </div>
-    <div class="card"><h3>Ордера этого клиента</h3><div id="mnOrders">—</div></div>`;
+    <div class="card">
+      <h3 class="row" style="justify-content:space-between;align-items:center">
+        <span>Ордера <span id="mnOrdersScope">этого клиента</span></span>
+        <label class="small muted" style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="mnOrdersAll">показать все</label>
+      </h3>
+      <div id="mnOrders">—</div>
+    </div>`;
   const client = () => mnClients.find((c) => c.id === Number($("mnClient").value));
+  function renderOpen() {
+    const c = client();
+    const items = c.open || [];
+    $("mnOpen").innerHTML = items.length ? table(["Монета", "Тип", "Сторона", ""], items.map((o) =>
+      `<tr><td>${o.symbol}</td><td>${o.kind === "grid" ? "сетка" : "позиция"}</td>
+        <td class="${o.side === "Sell" ? "neg" : "pos"}">${o.side || "—"}</td>
+        <td><button class="btn danger" data-close="${o.symbol}" data-side="${o.side || "Buy"}">Закрыть</button></td></tr>`))
+      : `<div class="muted small">Нет открытых позиций или сеток</div>`;
+    $("mnOpen").querySelectorAll("[data-close]").forEach((b) => (b.onclick = async () => {
+      const c2 = client();
+      if (!confirm(`Закрыть ${b.dataset.close} у клиента «${c2.name}»?`)) return;
+      try {
+        await post("/manual/close", { user_id: c2.id, symbol: b.dataset.close, side: b.dataset.side });
+        toast("Заявка на закрытие поставлена в очередь");
+        loadOrders();
+      } catch (e) { toast(e.message); }
+    }));
+  }
   function renderInfo() {
     const c = client();
     $("mnSymbol").innerHTML = c.symbols.map((s) => `<option value="${s}">${s}</option>`).join("");
@@ -456,6 +486,7 @@ VIEWS.manual = async () => {
     $("mnToggle").textContent = c.manual_mode ? "▶ Включить автотрейдинг" : "✋ Выключить автотрейдинг (ручной режим)";
     $("mnToggle").className = "btn " + (c.manual_mode ? "primary" : "danger");
     $("mnPrice0").value = "";
+    renderOpen();
     loadOrders();
   }
   $("mnClient").onchange = renderInfo;
@@ -473,29 +504,37 @@ VIEWS.manual = async () => {
   $("mnRefreshPrice").onclick = async () => {
     try { const r = await api("/manual/price?symbol=" + $("mnSymbol").value); $("mnPrice0").value = r.price; } catch (e) { toast(e.message); }
   };
+  $("mnOrdersAll").onchange = () => loadOrders();
   $("mnSend").onclick = async () => {
     const c = client();
     const side = $("mnSide").querySelector("button.on").dataset.v;
     const type = $("mnType").querySelector("button.on").dataset.v;
     const qty = Number($("mnQty").value);
+    const broadcast = $("mnBroadcast").checked;
     if (!qty || qty <= 0) { toast("Укажите объём"); return; }
     if (type === "limit" && !Number($("mnLimitPrice").value)) { toast("Укажите цену лимитного ордера"); return; }
-    if (!confirm(`Отправить ${type === "market" ? "рыночный" : "лимитный"} ордер ${side} по ${$("mnSymbol").value} клиенту «${c.name}»?`)) return;
+    const target = broadcast ? `ВСЕМ клиентам, у кого включена ${$("mnSymbol").value}` : `клиенту «${c.name}»`;
+    if (!confirm(`Отправить ${type === "market" ? "рыночный" : "лимитный"} ордер ${side} по ${$("mnSymbol").value} ${target}?`)) return;
     try {
-      await post("/manual/order", { user_id: c.id, symbol: $("mnSymbol").value, side, order_type: type, qty,
+      const r = await post("/manual/order", { user_id: c.id, symbol: $("mnSymbol").value, side, order_type: type, qty,
         price: type === "limit" ? Number($("mnLimitPrice").value) : null,
-        stop_loss: $("mnSl").value || null, take_profit: $("mnTp").value || null, leverage: $("mnLev").value || null });
-      $("mnRes").className = "note ok"; $("mnRes").textContent = "Ордер поставлен в очередь — движок исполнит его в течение нескольких секунд.";
+        stop_loss: $("mnSl").value || null, take_profit: $("mnTp").value || null, leverage: $("mnLev").value || null,
+        broadcast });
+      $("mnRes").className = "note ok";
+      $("mnRes").textContent = broadcast ? `Ордер поставлен в очередь для ${r.count} клиентов.` : "Ордер поставлен в очередь — движок исполнит его в течение нескольких секунд.";
       $("mnQty").value = ""; $("mnSl").value = ""; $("mnTp").value = ""; $("mnLev").value = ""; $("mnLimitPrice").value = "";
       loadOrders();
     } catch (e) { $("mnRes").className = "note err"; $("mnRes").textContent = e.message; }
   };
   async function loadOrders() {
     const c = client();
-    const rows = await api("/manual/orders?user_id=" + c.id);
-    $("mnOrders").innerHTML = table(["Когда", "Монета", "Сторона", "Тип", "Объём", "Цена / SL / TP", "Плечо", "Статус", "Кто", ""], rows.map((o) =>
-      `<tr><td>${dt(o.created_at)}</td><td>${o.symbol}</td><td class="${o.side === "Buy" ? "pos" : "neg"}">${o.side}</td><td>${o.order_type === "limit" ? "лимит" : "рынок"}</td>
-        <td class="num">${o.qty}</td><td class="num small">${o.price ?? "рынок"}${o.stop_loss ? " · SL " + o.stop_loss : ""}${o.take_profit ? " · TP " + o.take_profit : ""}</td>
+    const all = $("mnOrdersAll").checked;
+    $("mnOrdersScope").textContent = all ? "всех клиентов" : "этого клиента";
+    const rows = await api(all ? "/manual/orders" : "/manual/orders?user_id=" + c.id);
+    const cols = ["Когда", ...(all ? ["Клиент"] : []), "Монета", "Сторона", "Тип", "Объём", "Цена / SL / TP", "Плечо", "Статус", "Кто", ""];
+    $("mnOrders").innerHTML = table(cols, rows.map((o) =>
+      `<tr><td>${dt(o.created_at)}</td>${all ? `<td>${esc(o.client)}</td>` : ""}<td>${o.symbol}</td><td class="${o.side === "Buy" ? "pos" : "neg"}">${o.side}</td><td>${MN_TYPE[o.order_type] || o.order_type}</td>
+        <td class="num">${o.order_type === "close" ? "—" : o.qty}</td><td class="num small">${o.order_type === "close" ? "закрытие позиции" : (o.price ?? "рынок")}${o.stop_loss ? " · SL " + o.stop_loss : ""}${o.take_profit ? " · TP " + o.take_profit : ""}</td>
         <td class="num">${o.leverage ? "×" + o.leverage : "—"}</td>
         <td><span class="tag ${MN_CLASS[o.status] || ""}">${MN_STATUS[o.status] || o.status}</span>${o.status === "error" && o.error ? `<div class="muted small">${esc(o.error)}</div>` : ""}</td>
         <td class="muted small">${esc(o.created_by)}</td>
@@ -506,7 +545,10 @@ VIEWS.manual = async () => {
     }));
   }
   renderInfo();
-  mnTimer = setInterval(() => { if (current === "manual") loadOrders().catch(() => {}); }, 4000);
+  mnTimer = setInterval(async () => {
+    if (current !== "manual") return;
+    try { mnClients = await api("/manual/clients"); renderOpen(); await loadOrders(); } catch (e) {}
+  }, 4000);
 };
 
 // ───────────── настройки ─────────────

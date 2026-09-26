@@ -92,6 +92,7 @@ final class AdminApi
             ['GET', '/manual/clients'] => self::manualClients(),
             ['GET', '/manual/orders'] => self::manualOrders((int)($_GET['user_id'] ?? 0)),
             ['POST', '/manual/order'] => self::manualCreate($b, $a),
+            ['POST', '/manual/close'] => self::manualClose($b, $a),
             ['GET', '/manual/price'] => self::manualPrice((string)($_GET['symbol'] ?? '')),
             ['GET', '/logs'] => self::logs(max(10, min(2000, (int)($_GET['lines'] ?? 200)))),
             ['GET', '/admins'] => self::admins(),
@@ -760,16 +761,24 @@ final class AdminApi
     private static function manualClients(): array
     {
         $rows = DB::all("SELECT u.id, u.username, u.first_name, b.running, b.manual_mode, b.trading_mode, b.symbols,
-                a.mode AS ex_mode, w.equity, w.status
+                a.mode AS ex_mode, w.equity, w.status, w.live, w.updated_at
             FROM users u JOIN bot_settings b ON b.user_id = u.id
             LEFT JOIN exchange_accounts a ON a.user_id = u.id
             LEFT JOIN worker_state w ON w.user_id = u.id
             WHERE u.blocked = 0 ORDER BY u.id DESC");
-        return array_map(fn($r) => ['id' => (int)$r['id'], 'name' => $r['first_name'] ?: ($r['username'] ?: ('#' . $r['id'])),
-            'username' => $r['username'], 'trading_mode' => $r['trading_mode'], 'running' => (bool)$r['running'],
-            'manual_mode' => (bool)$r['manual_mode'], 'exchange' => $r['ex_mode'] ? ($r['ex_mode'] === 'live' ? 'реальный' : 'демо Bybit') : null,
-            'symbols' => json_decode((string)$r['symbols'], true) ?: [], 'equity' => $r['equity'] !== null ? round((float)$r['equity'], 2) : null,
-            'status' => $r['status']], $rows);
+        return array_map(function ($r) {
+            $live = $r['live'] && $r['updated_at'] && strtotime($r['updated_at'] . ' UTC') > time() - 120
+                ? json_decode((string)$r['live'], true) : null;
+            $open = $live ? array_merge(
+                array_map(fn($d) => ['symbol' => $d['symbol'], 'side' => $d['side'], 'kind' => 'position'], $live['directional'] ?? []),
+                array_map(fn($g) => ['symbol' => $g['symbol'], 'side' => null, 'kind' => 'grid'], $live['grids'] ?? [])
+            ) : [];
+            return ['id' => (int)$r['id'], 'name' => $r['first_name'] ?: ($r['username'] ?: ('#' . $r['id'])),
+                'username' => $r['username'], 'trading_mode' => $r['trading_mode'], 'running' => (bool)$r['running'],
+                'manual_mode' => (bool)$r['manual_mode'], 'exchange' => $r['ex_mode'] ? ($r['ex_mode'] === 'live' ? 'реальный' : 'демо Bybit') : null,
+                'symbols' => json_decode((string)$r['symbols'], true) ?: [], 'equity' => $r['equity'] !== null ? round((float)$r['equity'], 2) : null,
+                'status' => $r['status'], 'open' => $open];
+        }, $rows);
     }
 
     /** Включает/выключает ручной режим клиенту: пока включён, автостратегии новых сделок не открывают. */
@@ -800,13 +809,14 @@ final class AdminApi
         return ['symbol' => $symbol, 'price' => (float)($r['list'][0]['lastPrice'] ?? 0)];
     }
 
-    /** Новый ручной ордер — становится в очередь manual_orders, исполняет демон (Manager::processManualOrders). */
+    /**
+     * Новый ручной ордер — становится в очередь manual_orders, исполняет демон (Manager::processManualOrders).
+     * broadcast=true: та же заявка ставится в очередь сразу всем незаблокированным клиентам, у которых эта монета
+     * есть в списке торгуемых, а не только выбранному в форме (каждому — своя строка в manual_orders,
+     * ошибка/отсутствие позиции у одного клиента не мешает остальным).
+     */
     private static function manualCreate(array $b, string $admin): array
     {
-        $uid = (int)($b['user_id'] ?? 0);
-        if (!DB::val('SELECT 1 FROM users WHERE id = ? AND blocked = 0', [$uid])) {
-            Api::fail(404, 'Клиент не найден или заблокирован');
-        }
         $symbol = strtoupper(trim((string)($b['symbol'] ?? '')));
         if (!in_array($symbol, Settings::get('symbols'), true)) {
             Api::fail(400, 'Неизвестная монета');
@@ -833,10 +843,51 @@ final class AdminApi
         $sl = isset($b['stop_loss']) && $b['stop_loss'] !== '' && $b['stop_loss'] !== null ? (float)$b['stop_loss'] : null;
         $tp = isset($b['take_profit']) && $b['take_profit'] !== '' && $b['take_profit'] !== null ? (float)$b['take_profit'] : null;
         $lev = isset($b['leverage']) && $b['leverage'] !== '' && $b['leverage'] !== null ? max(1, min(125, (int)$b['leverage'])) : null;
-        $id = DB::insert('manual_orders', ['user_id' => $uid, 'symbol' => $symbol, 'side' => $side, 'order_type' => $type,
-            'qty' => $qty, 'price' => $price, 'stop_loss' => $sl, 'take_profit' => $tp, 'leverage' => $lev,
-            'status' => 'pending', 'created_by' => $admin, 'created_at' => DB::now()]);
+        $row = ['symbol' => $symbol, 'side' => $side, 'order_type' => $type, 'qty' => $qty, 'price' => $price,
+            'stop_loss' => $sl, 'take_profit' => $tp, 'leverage' => $lev, 'status' => 'pending',
+            'created_by' => $admin, 'created_at' => DB::now()];
+
+        if (!empty($b['broadcast'])) {
+            $uids = array_column(DB::all('SELECT u.id, b.symbols FROM users u JOIN bot_settings b ON b.user_id = u.id
+                WHERE u.blocked = 0'), 'symbols', 'id');
+            $ids = [];
+            foreach ($uids as $uid => $symbolsJson) {
+                if (in_array($symbol, json_decode((string)$symbolsJson, true) ?: [], true)) {
+                    $ids[] = DB::insert('manual_orders', ['user_id' => (int)$uid] + $row);
+                }
+            }
+            if (!$ids) {
+                Api::fail(400, 'Нет клиентов, у которых эта монета включена в торговые настройки');
+            }
+            self::audit($admin, 'manual.order_broadcast', "$symbol $side $type qty=$qty · клиентов: " . count($ids));
+            return ['ok' => true, 'ids' => $ids, 'count' => count($ids)];
+        }
+
+        $uid = (int)($b['user_id'] ?? 0);
+        if (!DB::val('SELECT 1 FROM users WHERE id = ? AND blocked = 0', [$uid])) {
+            Api::fail(404, 'Клиент не найден или заблокирован');
+        }
+        $id = DB::insert('manual_orders', ['user_id' => $uid] + $row);
         self::audit($admin, 'manual.order', "клиент $uid: $symbol $side $type qty=$qty");
+        return ['ok' => true, 'id' => $id];
+    }
+
+    /** Закрытие открытой позиции/сетки клиента по рынку — в очередь manual_orders (order_type=close), исполняет демон. */
+    private static function manualClose(array $b, string $admin): array
+    {
+        $uid = (int)($b['user_id'] ?? 0);
+        if (!DB::val('SELECT 1 FROM users WHERE id = ? AND blocked = 0', [$uid])) {
+            Api::fail(404, 'Клиент не найден или заблокирован');
+        }
+        $symbol = strtoupper(trim((string)($b['symbol'] ?? '')));
+        if (!in_array($symbol, Settings::get('symbols'), true)) {
+            Api::fail(400, 'Неизвестная монета');
+        }
+        $side = in_array($b['side'] ?? '', ['Buy', 'Sell'], true) ? $b['side'] : 'Buy';
+        $id = DB::insert('manual_orders', ['user_id' => $uid, 'symbol' => $symbol, 'side' => $side, 'order_type' => 'close',
+            'qty' => 0, 'price' => null, 'stop_loss' => null, 'take_profit' => null, 'leverage' => null,
+            'status' => 'pending', 'created_by' => $admin, 'created_at' => DB::now()]);
+        self::audit($admin, 'manual.close', "клиент $uid: $symbol");
         return ['ok' => true, 'id' => $id];
     }
 

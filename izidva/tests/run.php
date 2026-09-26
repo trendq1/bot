@@ -402,6 +402,34 @@ test('нельзя открыть второй ручной ордер, пока
     }
     check($threw, 'повторный ордер по той же монете отклонён, пока есть открытая позиция');
 });
+test('ручное закрытие позиции трейдером', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 100000.0;
+    $brain = new Brain(new Learner());
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 100000.0]);
+    $notes = [];
+    $w = new Worker(780, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) use (&$notes) { $notes[] = $m; }, function ($u, $e) {});
+    $w->manualOrder(['id' => 5, 'symbol' => 'BTCUSDT', 'side' => 'Buy', 'order_type' => 'market', 'qty' => 0.01,
+        'price' => null, 'stop_loss' => null, 'take_profit' => null, 'leverage' => null]);
+    check(isset($ex->positions()['BTCUSDT']), 'позиция открыта на бирже');
+    $r = $w->manualClose(['symbol' => 'BTCUSDT']);
+    check(str_contains($r['detail'], 'закрытие'), 'ответ подтверждает отправку заявки на закрытие');
+    check(!isset($ex->positions()['BTCUSDT']), 'позиция закрыта на бирже сразу');
+    check(isset($w->directional['BTCUSDT']), 'в directional ещё числится — снимется через checkDirectional на step()');
+    $w->directional['BTCUSDT']['opened_ms'] -= 5000;
+    $w->step(microtime(true));
+    check(!isset($w->directional['BTCUSDT']), 'после step() сделка записана и снята с отслеживания');
+    $threw = false;
+    try {
+        $w->manualClose(['symbol' => 'BTCUSDT']);
+    } catch (\RuntimeException $e) {
+        $threw = true;
+    }
+    check($threw, 'закрыть монету без открытой позиции нельзя');
+});
 test('ручной режим: автостратегии не открывают новых сделок', function () use ($BTC) {
     $market = new Market(['BTCUSDT']);
     $market->instruments['BTCUSDT'] = $BTC;

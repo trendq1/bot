@@ -285,12 +285,17 @@ final class Manager
                 $this->updateManualOrder((int)$o['id'], 'error', 'клиент не подключён — бот остановлен или биржа не подключена');
                 continue;
             }
-            $order = ['id' => (int)$o['id'], 'symbol' => $o['symbol'], 'side' => $o['side'], 'order_type' => $o['order_type'],
-                'qty' => (float)$o['qty'], 'price' => $o['price'] !== null ? (float)$o['price'] : null,
-                'stop_loss' => $o['stop_loss'] !== null ? (float)$o['stop_loss'] : null,
-                'take_profit' => $o['take_profit'] !== null ? (float)$o['take_profit'] : null,
-                'leverage' => $o['leverage'] !== null ? (int)$o['leverage'] : null];
             try {
+                if ($o['order_type'] === 'close') {
+                    $r = $w->manualClose(['symbol' => $o['symbol']]);
+                    $this->updateManualOrder((int)$o['id'], 'done', $r['detail']);
+                    continue;
+                }
+                $order = ['id' => (int)$o['id'], 'symbol' => $o['symbol'], 'side' => $o['side'], 'order_type' => $o['order_type'],
+                    'qty' => (float)$o['qty'], 'price' => $o['price'] !== null ? (float)$o['price'] : null,
+                    'stop_loss' => $o['stop_loss'] !== null ? (float)$o['stop_loss'] : null,
+                    'take_profit' => $o['take_profit'] !== null ? (float)$o['take_profit'] : null,
+                    'leverage' => $o['leverage'] !== null ? (int)$o['leverage'] : null];
                 $r = $w->manualOrder($order);
                 $this->updateManualOrder((int)$o['id'], $r['status'] === 'placed' ? 'open' : 'done', $r['detail']);
             } catch (\Throwable $e) {
