@@ -271,6 +271,16 @@ final class Manager
             } elseif ($c['cmd'] === 'restart_engine') {
                 $this->stop = true;
                 $this->exitCode = RESTART_CODE;
+            } elseif ($c['cmd'] === 'manual_close') {
+                [$uid, $sym] = array_pad(explode(':', (string)$c['arg'], 2), 2, '');
+                $w = $this->workers[(int)$uid] ?? null;
+                if ($w) {
+                    try {
+                        $w->closeManual($sym);
+                    } catch (\Throwable $e) {
+                        Log::warn("manual_close user $uid $sym: " . $e->getMessage());
+                    }
+                }
             }
             $this->ts['sync'] = 0;
         }

@@ -289,6 +289,37 @@ final class Worker
         return true;
     }
 
+    /** Закрыть по команде трейдера всё, что сейчас есть по монете: сетку, позицию или неисполненный ордер. */
+    public function closeManual(string $sym): void
+    {
+        if (isset($this->grids[$sym])) {
+            $grid = $this->grids[$sym];
+            try {
+                $ev = $grid->stop($this->market->feeds[$sym]->price ?? $grid->plan['center']);
+                if ($ev) {
+                    $this->onGridEvent($sym, $grid, $ev, $this->brain->insights[$sym]['regime'] ?? 'range');
+                }
+            } catch (\Throwable $e) {
+                Log::error("user {$this->userId}: не удалось закрыть сетку $sym по команде трейдера: " . $e->getMessage());
+            }
+            unset($this->grids[$sym]);
+            ($this->notify)($this->userId, "🖐 Трейдер закрыл сетку по $sym");
+            return;
+        }
+        if (isset($this->pendingManual[$sym])) {
+            $this->ex->cancel($sym, $this->pendingManual[$sym]['link']);
+            unset($this->pendingManual[$sym]);
+            ($this->notify)($this->userId, "🖐 Трейдер отменил неисполненный ордер по $sym");
+            return;
+        }
+        if (isset($this->directional[$sym]) || isset($this->ex->positions()[$sym])) {
+            $this->ex->closePosition($sym);            // закрытие увидит checkDirectional на следующем такте и запишет сделку
+            ($this->notify)($this->userId, "🖐 Трейдер закрыл позицию по $sym");
+            return;
+        }
+        throw new \RuntimeException("по $sym нет ни сетки, ни позиции, ни неисполненного ордера");
+    }
+
     private function reportOrder(int $orderId, string $status, ?string $detail = null): void
     {
         if ($this->orderUpdate && $orderId > 0) {

@@ -402,6 +402,54 @@ test('нельзя открыть второй ручной ордер, пока
     }
     check($threw, 'повторный ордер по той же монете отклонён, пока есть открытая позиция');
 });
+test('трейдер может закрыть открытую вручную позицию', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 100000.0;
+    $brain = new Brain(new Learner());
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 100000.0]);
+    $notes = [];
+    $w = new Worker(781, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) use (&$notes) { $notes[] = $m; }, function ($u, $e) {});
+    $w->manualOrder(['id' => 5, 'symbol' => 'BTCUSDT', 'side' => 'Buy', 'order_type' => 'market', 'qty' => 0.01,
+        'price' => null, 'stop_loss' => null, 'take_profit' => null, 'leverage' => null]);
+    check(isset($w->directional['BTCUSDT']), 'позиция открыта');
+    $w->closeManual('BTCUSDT');
+    check($ex->positions() === [], 'позиция закрыта на бирже сразу');
+    check(count($notes) === 2 && str_contains(end($notes), 'закрыл позицию'), 'клиент уведомлён о закрытии трейдером');
+});
+test('трейдер может отменить неисполненный лимитный ордер кнопкой «Закрыть»', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 100000.0;
+    $brain = new Brain(new Learner());
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 100000.0]);
+    $w = new Worker(782, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->manualOrder(['id' => 6, 'symbol' => 'BTCUSDT', 'side' => 'Buy', 'order_type' => 'limit', 'qty' => 0.01,
+        'price' => 90000, 'stop_loss' => null, 'take_profit' => null, 'leverage' => null]);
+    check(isset($w->pendingManual['BTCUSDT']), 'лимитный ордер ждёт исполнения');
+    $w->closeManual('BTCUSDT');
+    check(!isset($w->pendingManual['BTCUSDT']), 'неисполненный лимитный ордер снят');
+});
+test('закрывать нечего — понятная ошибка', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 100000.0;
+    $brain = new Brain(new Learner());
+    $ex = new PaperExchange(10000);
+    $w = new Worker(783, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $threw = false;
+    try {
+        $w->closeManual('BTCUSDT');
+    } catch (\RuntimeException $e) {
+        $threw = true;
+    }
+    check($threw, 'закрытие без открытой позиции/сетки/ордера бросает исключение');
+});
 test('ручной режим: автостратегии не открывают новых сделок', function () use ($BTC) {
     $market = new Market(['BTCUSDT']);
     $market->instruments['BTCUSDT'] = $BTC;

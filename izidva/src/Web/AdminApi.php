@@ -92,6 +92,9 @@ final class AdminApi
             ['GET', '/manual/clients'] => self::manualClients(),
             ['GET', '/manual/orders'] => self::manualOrders((int)($_GET['user_id'] ?? 0)),
             ['POST', '/manual/order'] => self::manualCreate($b, $a),
+            ['POST', '/manual/order/all'] => self::manualCreateAll($b, $a),
+            ['GET', '/manual/positions'] => self::manualPositions((int)($_GET['user_id'] ?? 0)),
+            ['POST', '/manual/close'] => self::manualClose($b, $a),
             ['GET', '/manual/price'] => self::manualPrice((string)($_GET['symbol'] ?? '')),
             ['GET', '/logs'] => self::logs(max(10, min(2000, (int)($_GET['lines'] ?? 200)))),
             ['GET', '/admins'] => self::admins(),
@@ -137,7 +140,10 @@ final class AdminApi
             || ($m === 'GET' && $path === '/manual/clients')
             || ($m === 'GET' && $path === '/manual/orders')
             || ($m === 'GET' && $path === '/manual/price')
+            || ($m === 'GET' && $path === '/manual/positions')
             || ($m === 'POST' && $path === '/manual/order')
+            || ($m === 'POST' && $path === '/manual/order/all')
+            || ($m === 'POST' && $path === '/manual/close')
             || ($m === 'POST' && $path === '/admins/password')
             || preg_match('#^/manual/orders/\d+/cancel$#', $path)
             || preg_match('#^/manual/mode/\d+$#', $path);
@@ -800,13 +806,9 @@ final class AdminApi
         return ['symbol' => $symbol, 'price' => (float)($r['list'][0]['lastPrice'] ?? 0)];
     }
 
-    /** Новый ручной ордер — становится в очередь manual_orders, исполняет демон (Manager::processManualOrders). */
-    private static function manualCreate(array $b, string $admin): array
+    /** Общая проверка полей ручного ордера — используется и для одного клиента, и для рассылки всем. */
+    private static function manualValidate(array $b): array
     {
-        $uid = (int)($b['user_id'] ?? 0);
-        if (!DB::val('SELECT 1 FROM users WHERE id = ? AND blocked = 0', [$uid])) {
-            Api::fail(404, 'Клиент не найден или заблокирован');
-        }
         $symbol = strtoupper(trim((string)($b['symbol'] ?? '')));
         if (!in_array($symbol, Settings::get('symbols'), true)) {
             Api::fail(400, 'Неизвестная монета');
@@ -833,11 +835,63 @@ final class AdminApi
         $sl = isset($b['stop_loss']) && $b['stop_loss'] !== '' && $b['stop_loss'] !== null ? (float)$b['stop_loss'] : null;
         $tp = isset($b['take_profit']) && $b['take_profit'] !== '' && $b['take_profit'] !== null ? (float)$b['take_profit'] : null;
         $lev = isset($b['leverage']) && $b['leverage'] !== '' && $b['leverage'] !== null ? max(1, min(125, (int)$b['leverage'])) : null;
-        $id = DB::insert('manual_orders', ['user_id' => $uid, 'symbol' => $symbol, 'side' => $side, 'order_type' => $type,
-            'qty' => $qty, 'price' => $price, 'stop_loss' => $sl, 'take_profit' => $tp, 'leverage' => $lev,
+        return ['symbol' => $symbol, 'side' => $side, 'type' => $type, 'qty' => $qty, 'price' => $price, 'sl' => $sl, 'tp' => $tp, 'lev' => $lev];
+    }
+
+    /** Новый ручной ордер одному клиенту — становится в очередь manual_orders, исполняет демон. */
+    private static function manualCreate(array $b, string $admin): array
+    {
+        $uid = (int)($b['user_id'] ?? 0);
+        if (!DB::val('SELECT 1 FROM users WHERE id = ? AND blocked = 0', [$uid])) {
+            Api::fail(404, 'Клиент не найден или заблокирован');
+        }
+        $v = self::manualValidate($b);
+        $id = DB::insert('manual_orders', ['user_id' => $uid, 'symbol' => $v['symbol'], 'side' => $v['side'], 'order_type' => $v['type'],
+            'qty' => $v['qty'], 'price' => $v['price'], 'stop_loss' => $v['sl'], 'take_profit' => $v['tp'], 'leverage' => $v['lev'],
             'status' => 'pending', 'created_by' => $admin, 'created_at' => DB::now()]);
-        self::audit($admin, 'manual.order', "клиент $uid: $symbol $side $type qty=$qty");
+        self::audit($admin, 'manual.order', "клиент $uid: {$v['symbol']} {$v['side']} {$v['type']} qty={$v['qty']}");
         return ['ok' => true, 'id' => $id];
+    }
+
+    /** Тот же ручной ордер сразу всем незаблокированным клиентам — по одной строке manual_orders на каждого. */
+    private static function manualCreateAll(array $b, string $admin): array
+    {
+        $v = self::manualValidate($b);
+        $ids = array_column(DB::all('SELECT b.user_id FROM bot_settings b JOIN users u ON u.id = b.user_id WHERE u.blocked = 0'), 'user_id');
+        if (!$ids) {
+            Api::fail(400, 'Нет ни одного клиента');
+        }
+        foreach ($ids as $uid) {
+            DB::insert('manual_orders', ['user_id' => (int)$uid, 'symbol' => $v['symbol'], 'side' => $v['side'], 'order_type' => $v['type'],
+                'qty' => $v['qty'], 'price' => $v['price'], 'stop_loss' => $v['sl'], 'take_profit' => $v['tp'], 'leverage' => $v['lev'],
+                'status' => 'pending', 'created_by' => $admin, 'created_at' => DB::now()]);
+        }
+        self::audit($admin, 'manual.order_all', "{$v['symbol']} {$v['side']} {$v['type']} qty={$v['qty']} -> " . count($ids) . ' клиентов');
+        return ['ok' => true, 'count' => count($ids)];
+    }
+
+    /** Что сейчас открыто у клиента: сетки, направленные позиции, неисполненные ручные ордера — для кнопок «Закрыть». */
+    private static function manualPositions(int $uid): array
+    {
+        $ws = DB::row('SELECT live, updated_at FROM worker_state WHERE user_id = ?', [$uid]);
+        if (!$ws || strtotime($ws['updated_at'] . ' UTC') < time() - 120) {
+            return ['grids' => [], 'directional' => [], 'pending_manual' => []];
+        }
+        $live = json_decode((string)$ws['live'], true) ?: [];
+        return ['grids' => $live['grids'] ?? [], 'directional' => $live['directional'] ?? [], 'pending_manual' => $live['pending_manual'] ?? []];
+    }
+
+    /** Закрыть по монете всё, что там открыто (сетку, позицию или неисполненный лимит) — команда демону. */
+    private static function manualClose(array $b, string $admin): array
+    {
+        $uid = (int)($b['user_id'] ?? 0);
+        $symbol = strtoupper(trim((string)($b['symbol'] ?? '')));
+        if (!$uid || $symbol === '') {
+            Api::fail(400, 'Не указан клиент или монета');
+        }
+        DB::insert('engine_commands', ['cmd' => 'manual_close', 'arg' => "$uid:$symbol", 'created_at' => DB::now()]);
+        self::audit($admin, 'manual.close', "$uid $symbol");
+        return ['ok' => true];
     }
 
     /** Журнал ручных ордеров: по клиенту (?user_id=) или общий, для опроса статуса из формы. */

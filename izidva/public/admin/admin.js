@@ -428,8 +428,10 @@ VIEWS.manual = async () => {
       <div id="mnInfo" class="muted small" style="margin-top:8px"></div>
       <button class="btn" id="mnToggle" style="margin-top:10px"></button>
     </div>
+    <div class="card"><h3>Открыто у клиента сейчас</h3><div id="mnPositions">—</div></div>
     <div class="card" style="max-width:680px">
       <h3>Новый ордер</h3>
+      <label class="row" style="gap:8px"><input type="checkbox" id="mnAll" style="width:auto"> <b>Открыть сразу всем клиентам</b> <span class="muted small">(один и тот же ордер каждому)</span></label>
       <div class="grid2">
         <label>Монета<select id="mnSymbol"></select></label>
         <label>Текущая цена<div class="row"><input class="inp" id="mnPrice0" readonly placeholder="—"><button class="btn" type="button" id="mnRefreshPrice">↻</button></div></label>
@@ -448,6 +450,7 @@ VIEWS.manual = async () => {
     </div>
     <div class="card"><h3>Ордера этого клиента</h3><div id="mnOrders">—</div></div>`;
   const client = () => mnClients.find((c) => c.id === Number($("mnClient").value));
+  const POS_LABEL = { grid: "Сетка", position: "Позиция", pending: "Лимит (ждёт)" };
   function renderInfo() {
     const c = client();
     $("mnSymbol").innerHTML = c.symbols.map((s) => `<option value="${s}">${s}</option>`).join("");
@@ -456,7 +459,7 @@ VIEWS.manual = async () => {
     $("mnToggle").textContent = c.manual_mode ? "▶ Включить автотрейдинг" : "✋ Выключить автотрейдинг (ручной режим)";
     $("mnToggle").className = "btn " + (c.manual_mode ? "primary" : "danger");
     $("mnPrice0").value = "";
-    loadOrders();
+    refresh();
   }
   $("mnClient").onchange = renderInfo;
   $("mnToggle").onclick = async () => {
@@ -475,21 +478,50 @@ VIEWS.manual = async () => {
   };
   $("mnSend").onclick = async () => {
     const c = client();
+    const all = $("mnAll").checked;
     const side = $("mnSide").querySelector("button.on").dataset.v;
     const type = $("mnType").querySelector("button.on").dataset.v;
     const qty = Number($("mnQty").value);
     if (!qty || qty <= 0) { toast("Укажите объём"); return; }
     if (type === "limit" && !Number($("mnLimitPrice").value)) { toast("Укажите цену лимитного ордера"); return; }
-    if (!confirm(`Отправить ${type === "market" ? "рыночный" : "лимитный"} ордер ${side} по ${$("mnSymbol").value} клиенту «${c.name}»?`)) return;
+    const body = { symbol: $("mnSymbol").value, side, order_type: type, qty,
+      price: type === "limit" ? Number($("mnLimitPrice").value) : null,
+      stop_loss: $("mnSl").value || null, take_profit: $("mnTp").value || null, leverage: $("mnLev").value || null };
+    const question = all
+      ? `Отправить ${type === "market" ? "рыночный" : "лимитный"} ордер ${side} по ${body.symbol} СРАЗУ ВСЕМ клиентам?`
+      : `Отправить ${type === "market" ? "рыночный" : "лимитный"} ордер ${side} по ${body.symbol} клиенту «${c.name}»?`;
+    if (!confirm(question)) return;
     try {
-      await post("/manual/order", { user_id: c.id, symbol: $("mnSymbol").value, side, order_type: type, qty,
-        price: type === "limit" ? Number($("mnLimitPrice").value) : null,
-        stop_loss: $("mnSl").value || null, take_profit: $("mnTp").value || null, leverage: $("mnLev").value || null });
-      $("mnRes").className = "note ok"; $("mnRes").textContent = "Ордер поставлен в очередь — движок исполнит его в течение нескольких секунд.";
+      if (all) {
+        const r = await post("/manual/order/all", body);
+        $("mnRes").className = "note ok"; $("mnRes").textContent = `Ордер поставлен в очередь для ${r.count} клиентов.`;
+      } else {
+        await post("/manual/order", { ...body, user_id: c.id });
+        $("mnRes").className = "note ok"; $("mnRes").textContent = "Ордер поставлен в очередь — движок исполнит его в течение нескольких секунд.";
+      }
       $("mnQty").value = ""; $("mnSl").value = ""; $("mnTp").value = ""; $("mnLev").value = ""; $("mnLimitPrice").value = "";
-      loadOrders();
+      refresh();
     } catch (e) { $("mnRes").className = "note err"; $("mnRes").textContent = e.message; }
   };
+  async function loadPositions() {
+    const c = client();
+    const p = await api("/manual/positions?user_id=" + c.id);
+    const rows = [
+      ...p.grids.map((g) => ({ kind: "grid", symbol: g.symbol, info: `${g.mode === "long" ? "лонг" : "шорт"} · заполнено ${g.filled}/${g.levels}` })),
+      ...p.directional.map((d) => ({ kind: "position", symbol: d.symbol, info: `${d.side === "Buy" ? "лонг" : "шорт"} · вход ${d.entry} · стоп ${d.stop}` })),
+      ...p.pending_manual.map((m) => ({ kind: "pending", symbol: m.symbol, info: `${m.side === "Buy" ? "лонг" : "шорт"} · объём ${m.qty} · ждёт исполнения` })),
+    ];
+    $("mnPositions").innerHTML = rows.length
+      ? table(["Монета", "Что", "Подробности", ""], rows.map((r) =>
+          `<tr><td>${r.symbol}</td><td>${POS_LABEL[r.kind]}</td><td class="small">${esc(r.info)}</td>
+            <td><button class="btn danger" data-close="${r.symbol}">✕ Закрыть</button></td></tr>`))
+      : `<div class="muted small">Открытых позиций, сеток и неисполненных ордеров нет.</div>`;
+    $("mnPositions").querySelectorAll("[data-close]").forEach((b) => (b.onclick = async () => {
+      if (!confirm(`Закрыть/отменить всё по ${b.dataset.close}?`)) return;
+      try { await post("/manual/close", { user_id: c.id, symbol: b.dataset.close }); toast("Команда отправлена"); setTimeout(loadPositions, 3000); }
+      catch (e) { toast(e.message); }
+    }));
+  }
   async function loadOrders() {
     const c = client();
     const rows = await api("/manual/orders?user_id=" + c.id);
@@ -505,8 +537,9 @@ VIEWS.manual = async () => {
       try { await post(`/manual/orders/${b.dataset.cancel}/cancel`); loadOrders(); } catch (e) { toast(e.message); }
     }));
   }
+  function refresh() { loadOrders().catch(() => {}); loadPositions().catch(() => {}); }
   renderInfo();
-  mnTimer = setInterval(() => { if (current === "manual") loadOrders().catch(() => {}); }, 4000);
+  mnTimer = setInterval(() => { if (current === "manual") refresh(); }, 4000);
 };
 
 // ───────────── настройки ─────────────
