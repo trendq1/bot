@@ -87,6 +87,7 @@ final class Manager
             $this->ts['ping'] = $now;
         }
         $this->handleCommands();
+        $this->processManualOrders();
         $this->market->tick();
         $this->refreshFeatures();
         if ($now - $this->ts['insights'] > 30) {
@@ -235,8 +236,9 @@ final class Manager
         $strategies = json_decode((string)$r['strategies'], true) ?: [];
         $this->workers[$uid] = new Worker($uid, $ex, $this->market, $this->brain, Risk::profile($r['risk_profile']), $symbols,
             $strategies, fn($u, $t) => $this->recordTrade($u, $t), fn($u, $m) => $this->notify($u, $m),
-            fn($u, $e) => $this->saveSnapshot($u, $e));
-        Log::info("user $uid: запущен ({$r['trading_mode']}, {$r['risk_profile']})");
+            fn($u, $e) => $this->saveSnapshot($u, $e), (bool)($r['manual_mode'] ?? false),
+            fn($id, $status, $detail) => $this->updateManualOrder($id, $status, $detail));
+        Log::info("user $uid: запущен ({$r['trading_mode']}, {$r['risk_profile']}" . (($r['manual_mode'] ?? false) ? ', ручной режим' : '') . ')');
     }
 
     public function stopWorker(int $uid): void
@@ -272,6 +274,42 @@ final class Manager
             }
             $this->ts['sync'] = 0;
         }
+    }
+
+    /** Ручные ордера трейдера из админ-панели (таблица manual_orders): новые заявки и запросы на отмену лимиток. */
+    private function processManualOrders(): void
+    {
+        foreach (DB::all("SELECT * FROM manual_orders WHERE status = 'pending' ORDER BY id") as $o) {
+            $w = $this->workers[(int)$o['user_id']] ?? null;
+            if (!$w) {
+                $this->updateManualOrder((int)$o['id'], 'error', 'клиент не подключён — бот остановлен или биржа не подключена');
+                continue;
+            }
+            $order = ['id' => (int)$o['id'], 'symbol' => $o['symbol'], 'side' => $o['side'], 'order_type' => $o['order_type'],
+                'qty' => (float)$o['qty'], 'price' => $o['price'] !== null ? (float)$o['price'] : null,
+                'stop_loss' => $o['stop_loss'] !== null ? (float)$o['stop_loss'] : null,
+                'take_profit' => $o['take_profit'] !== null ? (float)$o['take_profit'] : null,
+                'leverage' => $o['leverage'] !== null ? (int)$o['leverage'] : null];
+            try {
+                $r = $w->manualOrder($order);
+                $this->updateManualOrder((int)$o['id'], $r['status'] === 'placed' ? 'open' : 'done', $r['detail']);
+            } catch (\Throwable $e) {
+                $this->updateManualOrder((int)$o['id'], 'error', $e->getMessage());
+            }
+        }
+        foreach (DB::all("SELECT * FROM manual_orders WHERE status = 'cancel_requested' ORDER BY id") as $o) {
+            $w = $this->workers[(int)$o['user_id']] ?? null;
+            if ($w && $w->cancelManualOrder($o['symbol'], (int)$o['id'])) {
+                $this->updateManualOrder((int)$o['id'], 'cancelled', 'отменено трейдером');
+            } else {
+                $this->updateManualOrder((int)$o['id'], 'done', 'ордер уже не активен (исполнен или клиент офлайн)');
+            }
+        }
+    }
+
+    public function updateManualOrder(int $id, string $status, ?string $detail = null): void
+    {
+        DB::update('manual_orders', ['status' => $status, 'error' => $detail, 'done_at' => DB::now()], 'id = :id', [':id' => $id]);
     }
 
     // ───────────── запись и публикация ─────────────

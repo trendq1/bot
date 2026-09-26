@@ -112,6 +112,16 @@ test('лимитный ордер и прибыль', function () {
     check($ex->positions() === [], 'закрыт');
     check(near($ex->balance, 1000 + 10 - (990 + 1000) * 0.0002), 'баланс с комиссиями');
 });
+test('лимитный ордер с тейком и стопом (ручная торговля)', function () {
+    $ex = new PaperExchange(1000);
+    $ex->updatePrices(['BTCUSDT' => 100000]);
+    $ex->placeLimit('BTCUSDT', 'Buy', '0.01', '99000', 'm1', false, '97000', '105000');
+    $ex->updatePrices(['BTCUSDT' => 98900]);                 // лимитка исполнена
+    check(near($ex->positions()['BTCUSDT']['entry'], 99000), 'вход по лимиту');
+    $ex->updatePrices(['BTCUSDT' => 105500]);                // цена дошла до тейка
+    $c = $ex->closedPnl('BTCUSDT', 0);
+    check($ex->positions() === [] && count($c) === 1 && $c[0]['pnl'] > 0, 'тейк, заданный вместе с лимитным ордером, сработал');
+});
 test('стоп по рынку и reduce-only', function () {
     $ex = new PaperExchange(1000);
     $ex->updatePrices(['BTCUSDT' => 100000]);
@@ -237,7 +247,7 @@ test('миграции на пустую базу и повторно', function
     $applied = Migrator::run($pdo);
     check(count($applied) === count(Migrator::files()), 'все миграции');
     check(Migrator::run($pdo) === [], 'повторный запуск ничего не делает');
-    check((int)DB::val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()") === 20, '20 таблиц');
+    check((int)DB::val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()") === 21, '21 таблица');
 });
 test('настройки: секреты шифруются', function () {
     Settings::save(['anthropic_api_key' => 'sk-ant-1234', 'ai_interval_min' => '15', 'symbols' => 'btcusdt, ethusdt', 'require_referral' => 'false']);
@@ -320,6 +330,84 @@ test('синхронизация клиентов с БД', function () {
     DB::update('bot_settings', ['running' => true, 'trading_mode' => 'exchange'], 'user_id = :u', [':u' => 555]);
     $mgr->syncWorkers();
     check(!isset($mgr->workers[555]), 'биржа без ключей и подписки не запускается');
+});
+
+echo "Ручная торговля трейдера\n";
+test('ручной рыночный ордер: позиция отслеживается как обычная сделка', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 100000.0;
+    $brain = new Brain(new Learner());
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 100000.0]);
+    $notes = [];
+    $w = new Worker(777, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) use (&$notes) { $notes[] = $m; }, function ($u, $e) {});
+    $r = $w->manualOrder(['id' => 1, 'symbol' => 'BTCUSDT', 'side' => 'Buy', 'order_type' => 'market', 'qty' => 0.01,
+        'price' => null, 'stop_loss' => 95000, 'take_profit' => 110000, 'leverage' => 10]);
+    check($r['status'] === 'done', 'рыночный ордер исполняется сразу');
+    check(isset($w->directional['BTCUSDT']) && $w->directional['BTCUSDT']['strategy'] === 'manual', 'позиция трейдера — как directional, strategy=manual');
+    check(!empty($notes), 'клиент уведомлён в Telegram');
+    $w->directional['BTCUSDT']['opened_ms'] -= 5000;          // «прошло» больше 3 секунд с открытия (грация checkDirectional)
+    $ex->updatePrices(['BTCUSDT' => 110500]);                // цена дошла до тейка трейдера
+    $w->step(microtime(true));
+    check(!isset($w->directional['BTCUSDT']), 'позиция закрылась по тейку и снята с отслеживания');
+});
+test('ручной лимитный ордер: ждёт исполнения, потом отслеживается', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 100000.0;
+    $brain = new Brain(new Learner());
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 100000.0]);
+    $statuses = [];
+    $w = new Worker(778, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {}, false,
+        function ($id, $status, $detail) use (&$statuses) { $statuses[$id] = $status; });
+    $r = $w->manualOrder(['id' => 2, 'symbol' => 'BTCUSDT', 'side' => 'Buy', 'order_type' => 'limit', 'qty' => 0.01,
+        'price' => 99000, 'stop_loss' => null, 'take_profit' => null, 'leverage' => null]);
+    check($r['status'] === 'placed' && isset($w->pendingManual['BTCUSDT']), 'лимитка поставлена, ждём цену');
+    $ex->updatePrices(['BTCUSDT' => 98800]);                 // цена пересекла лимит — на бирже исполнилась
+    $w->pendingManual['BTCUSDT']['placed_ms'] -= 3000;        // «прошло» больше 2 секунд с момента выставления
+    $market->feeds['BTCUSDT']->price = 98800;
+    $w->step(microtime(true));
+    check(!isset($w->pendingManual['BTCUSDT']) && isset($w->directional['BTCUSDT']), 'после исполнения — снята из ожидания, взята под отслеживание');
+    check(($statuses[2] ?? null) === 'filled', 'статус ордера в БД обновится на "filled"');
+});
+test('нельзя открыть второй ручной ордер, пока не закрыт первый', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 100000.0;
+    $brain = new Brain(new Learner());
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 100000.0]);
+    $w = new Worker(779, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->manualOrder(['id' => 3, 'symbol' => 'BTCUSDT', 'side' => 'Buy', 'order_type' => 'market', 'qty' => 0.01,
+        'price' => null, 'stop_loss' => null, 'take_profit' => null, 'leverage' => null]);
+    $threw = false;
+    try {
+        $w->manualOrder(['id' => 4, 'symbol' => 'BTCUSDT', 'side' => 'Buy', 'order_type' => 'market', 'qty' => 0.01,
+            'price' => null, 'stop_loss' => null, 'take_profit' => null, 'leverage' => null]);
+    } catch (\RuntimeException $e) {
+        $threw = true;
+    }
+    check($threw, 'повторный ордер по той же монете отклонён, пока есть открытая позиция');
+});
+test('ручной режим: автостратегии не открывают новых сделок', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 100000.0;
+    $brain = new Brain(new Learner());
+    $brain->features['BTCUSDT'] = ['price' => 100000.0, 'atr' => 500.0, 'ema20' => 100000, 'ema20_1' => 100000, 'last_closed_ts' => 1.0, 'vwap_4h' => 100000];
+    $brain->insights['BTCUSDT'] = ['regime' => 'range', 'confidence' => 0.8, 'w_grid' => 1.0, 'w_trend' => 0.1, 'w_liquidation' => 0.1,
+        'grid_mode' => 'long', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 100000.0]);
+    $w = new Worker(780, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {}, true);
+    $w->step(microtime(true));
+    check(!isset($w->grids['BTCUSDT']), 'сетка не запускается, пока клиент переведён в ручной режим');
 });
 
 echo "\n";

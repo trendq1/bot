@@ -21,6 +21,8 @@ final class Worker
     public array $grids = [];
     /** symbol => [strategy, side, entry, stop, qty, regime, opened_ms, risk_usd] */
     public array $directional = [];
+    /** Лимитные ручные ордера, ждущие исполнения: symbol => [link, order_id, side, qty, stop, take, placed_ms] */
+    public array $pendingManual = [];
     public array $lastTrendBar = [];
     public array $lastLiq = [];
     public float $equity = 0.0;
@@ -33,6 +35,8 @@ final class Worker
      * @param callable(int,array):void $record   запись закрытой сделки
      * @param callable(int,string):void $notify  уведомление клиенту
      * @param callable(int,float):void $snapshot снимок баланса
+     * @param bool $manualMode  true — автостратегии не открывают новые сделки, только трейдер вручную
+     * @param ?callable(int,string,?string):void $orderUpdate  апдейт статуса строки manual_orders (id, статус, детали)
      */
     public function __construct(
         public int $userId,
@@ -45,6 +49,8 @@ final class Worker
         private $record,
         private $notify,
         private $snapshot,
+        public bool $manualMode = false,
+        private $orderUpdate = null,
     ) {
         $this->symbols = array_values(array_filter($symbols, fn($s) => isset($market->feeds[$s])));
         $this->guard = new RiskGuard($prof);
@@ -67,11 +73,13 @@ final class Worker
         [$allowed, $reason] = $this->guard->allowed($this->equity, $now);
         $positions = $this->ex->positions();
         $this->checkDirectional($positions, $now);
+        $this->checkPendingManual($positions, $now);
         foreach ($this->symbols as $sym) {
             $this->manageSymbol($sym, $positions, $allowed, $now);
         }
         $grids = implode(', ', array_map(fn($s, $g) => "$s:{$g->plan['mode']}", array_keys($this->grids), $this->grids));
-        $this->status = $allowed ? 'работает · сетки: ' . ($grids ?: 'нет') . ' · сделки: ' . count($this->directional) : "⏸ $reason";
+        $mode = $this->manualMode ? 'ручной режим' : 'работает';
+        $this->status = $allowed ? "$mode · сетки: " . ($grids ?: 'нет') . ' · сделки: ' . count($this->directional) : "⏸ $reason";
     }
 
     public function weights(string $sym, array $ins): array
@@ -116,8 +124,8 @@ final class Worker
             }
             return;
         }
-        if (!$allowed || isset($this->directional[$sym]) || isset($positions[$sym])) {
-            return;
+        if ($this->manualMode || !$allowed || isset($this->directional[$sym]) || isset($positions[$sym]) || isset($this->pendingManual[$sym])) {
+            return;                                          // в ручном режиме автостратегии новых сделок не открывают
         }
         arsort($w);
         $best = array_key_first($w);
@@ -188,12 +196,112 @@ final class Worker
             . ' · SL ' . $stop . ' · TP ' . $take);
     }
 
+    /**
+     * Ручной ордер трейдера из админ-панели: монета, рынок/лимит, тейк/стоп, плечо.
+     * @param array{symbol:string,side:string,order_type:string,qty:float,price:?float,stop_loss:?float,take_profit:?float,leverage:?int,id:int} $o
+     * @return array{status:string,detail:string}
+     */
+    public function manualOrder(array $o): array
+    {
+        $sym = (string)$o['symbol'];
+        if (!in_array($sym, $this->symbols, true) || !isset($this->market->instruments[$sym])) {
+            throw new \RuntimeException("монета $sym недоступна для этого клиента");
+        }
+        if (isset($this->grids[$sym]) || isset($this->directional[$sym]) || isset($this->pendingManual[$sym])) {
+            throw new \RuntimeException("по $sym уже есть открытая позиция, сетка или неисполненный ордер");
+        }
+        $inst = $this->market->instruments[$sym];
+        $price = $this->market->feeds[$sym]->price;
+        if (!$price) {
+            throw new \RuntimeException('нет текущей цены по монете, попробуйте через минуту');
+        }
+        if (!empty($o['leverage'])) {
+            $this->ex->setLeverage($sym, (int)min(max(1, (int)$o['leverage']), $inst->maxLeverage));
+            $this->leverageSet[$sym] = true;
+        }
+        $side = $o['side'] === 'Sell' ? 'Sell' : 'Buy';
+        $long = $side === 'Buy';
+        $q = $inst->roundQty((float)$o['qty']);                // строка — для вызовов биржи
+        $qty = (float)$q;                                      // число — для directional/pendingManual
+        $refPrice = $o['order_type'] === 'limit' ? (float)$o['price'] : $price;
+        if ($qty <= 0 || !$inst->qtyOk($q, $refPrice)) {
+            throw new \RuntimeException('слишком маленький объём для этой монеты');
+        }
+        $stop = $o['stop_loss'] ? (string)$inst->roundPrice((float)$o['stop_loss'], !$long) : null;
+        $take = $o['take_profit'] ? (string)$inst->roundPrice((float)$o['take_profit'], $long) : null;
+        if ($o['order_type'] === 'limit') {
+            $limitPrice = (string)$inst->roundPrice((float)$o['price'], false);
+            $linkId = 'manual-' . bin2hex(random_bytes(6));
+            $this->ex->placeLimit($sym, $side, $q, $limitPrice, $linkId, false, $stop, $take);
+            $this->pendingManual[$sym] = ['link' => $linkId, 'order_id' => (int)$o['id'], 'side' => $side, 'qty' => $qty,
+                'stop' => $stop !== null ? (float)$stop : null, 'take' => $take !== null ? (float)$take : null, 'placed_ms' => (int)(microtime(true) * 1000)];
+            ($this->notify)($this->userId, "🖐 Трейдер выставил лимитный ордер: $sym " . ($long ? 'LONG' : 'SHORT') . " по $limitPrice");
+            return ['status' => 'placed', 'detail' => "лимитный ордер по $limitPrice выставлен, ждём исполнения"];
+        }
+        $this->ex->placeMarket($sym, $side, $q, $stop, $take);
+        $this->directional[$sym] = ['strategy' => 'manual', 'side' => $side, 'entry' => $price, 'stop' => $stop !== null ? (float)$stop : 0.0,
+            'qty' => $qty, 'regime' => 'manual', 'opened_ms' => (int)(microtime(true) * 1000),
+            'risk_usd' => $stop !== null ? abs($price - (float)$stop) * $qty : 0.0];
+        ($this->notify)($this->userId, '🖐 Трейдер открыл ' . ($long ? '🟢 LONG' : '🔴 SHORT') . " $sym по рынку\nВход ~" . self::fmt($price)
+            . ($stop !== null ? ' · SL ' . $stop : '') . ($take !== null ? ' · TP ' . $take : ''));
+        return ['status' => 'done', 'detail' => 'позиция открыта по рынку, вход ~' . self::fmt($price)];
+    }
+
+    /** Ждём исполнения лимитных ручных ордеров; при исполнении — в directional, чтобы отследить закрытие как обычно. */
+    private function checkPendingManual(array $positions, float $now): void
+    {
+        $nowMs = (int)($now * 1000);
+        foreach ($this->pendingManual as $sym => $p) {
+            if ($nowMs - $p['placed_ms'] < 2000) {
+                continue;                                     // даём бирже время исполнить/отразить ордер
+            }
+            try {
+                $r = $this->ex->orderResult($sym, $p['link']);
+            } catch (\Throwable $e) {
+                continue;                                     // попробуем на следующем такте
+            }
+            if (in_array($r['status'], ['Filled', 'PartiallyFilled'], true) && ($r['filled_qty'] > 0 || isset($positions[$sym]))) {
+                unset($this->pendingManual[$sym]);
+                $entry = $r['avg_price'] > 0 ? $r['avg_price'] : ($positions[$sym]['entry'] ?? 0.0);
+                $qty = $r['filled_qty'] > 0 ? $r['filled_qty'] : $p['qty'];
+                $this->directional[$sym] = ['strategy' => 'manual', 'side' => $p['side'], 'entry' => $entry, 'stop' => $p['stop'] ?? 0.0,
+                    'qty' => $qty, 'regime' => 'manual', 'opened_ms' => $nowMs,
+                    'risk_usd' => $p['stop'] ? abs($entry - $p['stop']) * $qty : 0.0];
+                ($this->notify)($this->userId, "🖐 Лимитный ордер по $sym исполнен по " . self::fmt($entry));
+                $this->reportOrder((int)$p['order_id'], 'filled', 'исполнен по ' . self::fmt($entry));
+            } elseif (in_array($r['status'], ['Cancelled', 'Rejected', 'Deactivated'], true)) {
+                unset($this->pendingManual[$sym]);
+                ($this->notify)($this->userId, "🖐 Лимитный ордер по $sym отменён биржей ({$r['status']})");
+                $this->reportOrder((int)$p['order_id'], 'cancelled', 'отменён биржей: ' . $r['status']);
+            }
+        }
+    }
+
+    /** Отмена ещё не исполненного ручного лимитного ордера по команде из админки. */
+    public function cancelManualOrder(string $sym, int $orderId): bool
+    {
+        $p = $this->pendingManual[$sym] ?? null;
+        if (!$p || $p['order_id'] !== $orderId) {
+            return false;
+        }
+        $this->ex->cancel($sym, $p['link']);
+        unset($this->pendingManual[$sym]);
+        return true;
+    }
+
+    private function reportOrder(int $orderId, string $status, ?string $detail = null): void
+    {
+        if ($this->orderUpdate && $orderId > 0) {
+            ($this->orderUpdate)($orderId, $status, $detail);
+        }
+    }
+
     private function checkDirectional(array $positions, float $now): void
     {
         $nowMs = (int)($now * 1000);
         foreach ($this->directional as $sym => $d) {
             if (isset($positions[$sym])) {
-                if ($nowMs - $d['opened_ms'] > self::MAX_HOLD_SEC * 1000) {
+                if ($d['strategy'] !== 'manual' && $nowMs - $d['opened_ms'] > self::MAX_HOLD_SEC * 1000) {
                     $this->ex->closePosition($sym);
                 }
                 continue;
@@ -233,6 +341,9 @@ final class Worker
                 'filled' => count($g->inventory), 'levels' => $g->plan['levels']], array_keys($this->grids), array_values($this->grids)),
             'directional' => array_map(fn($s, $d) => ['symbol' => $s, 'strategy' => $d['strategy'], 'side' => $d['side'],
                 'entry' => $d['entry'], 'stop' => $d['stop']], array_keys($this->directional), array_values($this->directional)),
+            'pending_manual' => array_map(fn($s, $p) => ['symbol' => $s, 'side' => $p['side'], 'qty' => $p['qty']],
+                array_keys($this->pendingManual), array_values($this->pendingManual)),
+            'manual_mode' => $this->manualMode,
         ];
     }
 

@@ -30,6 +30,7 @@ final class AdminApi
         }
         $admin = self::currentAdmin();
         $a = $admin['username'];
+        self::checkRole($admin, $m, $path);
 
         if (preg_match('#^/users/(\d+)$#', $path, $mm) && $m === 'GET') {
             return self::userDetail((int)$mm[1]);
@@ -65,8 +66,14 @@ final class AdminApi
             self::audit($a, 'menu.delete', (string)$mm[1]);
             return ['ok' => true];
         }
+        if (preg_match('#^/manual/orders/(\d+)/cancel$#', $path, $mm) && $m === 'POST') {
+            return self::manualCancel((int)$mm[1], $a);
+        }
+        if (preg_match('#^/manual/mode/(\d+)$#', $path, $mm) && $m === 'POST') {
+            return self::manualMode((int)$mm[1], $b, $a);
+        }
         return match ([$m, $path]) {
-            ['GET', '/me'] => ['username' => $a],
+            ['GET', '/me'] => ['username' => $a, 'role' => $admin['role'] ?? 'admin'],
             ['GET', '/overview'] => self::overview(max(7, min(365, (int)($_GET['days'] ?? 30)))),
             ['GET', '/users'] => self::users((string)($_GET['q'] ?? ''), (string)($_GET['filter'] ?? 'all')),
             ['GET', '/payments'] => self::payments(),
@@ -82,6 +89,10 @@ final class AdminApi
             ['POST', '/broadcast'] => self::broadcast($b, $a),
             ['GET', '/menu'] => self::menuList(),
             ['POST', '/menu'] => self::menuAdd($b, $a),
+            ['GET', '/manual/clients'] => self::manualClients(),
+            ['GET', '/manual/orders'] => self::manualOrders((int)($_GET['user_id'] ?? 0)),
+            ['POST', '/manual/order'] => self::manualCreate($b, $a),
+            ['GET', '/manual/price'] => self::manualPrice((string)($_GET['symbol'] ?? '')),
             ['GET', '/logs'] => self::logs(max(10, min(2000, (int)($_GET['lines'] ?? 200)))),
             ['GET', '/admins'] => self::admins(),
             ['POST', '/admins'] => self::adminAdd($b, $a),
@@ -114,6 +125,25 @@ final class AdminApi
             Api::fail(401, 'Требуется вход');
         }
         return $admin;
+    }
+
+    /** Роль trader видит только раздел ручной торговли и не может делать ничего другого. */
+    private static function checkRole(array $admin, string $m, string $path): void
+    {
+        if (($admin['role'] ?? 'admin') !== 'trader') {
+            return;
+        }
+        $allowed = ($m === 'GET' && $path === '/me')
+            || ($m === 'GET' && $path === '/manual/clients')
+            || ($m === 'GET' && $path === '/manual/orders')
+            || ($m === 'GET' && $path === '/manual/price')
+            || ($m === 'POST' && $path === '/manual/order')
+            || ($m === 'POST' && $path === '/admins/password')
+            || preg_match('#^/manual/orders/\d+/cancel$#', $path)
+            || preg_match('#^/manual/mode/\d+$#', $path);
+        if (!$allowed) {
+            Api::fail(403, 'Роль «трейдер» видит только ручную торговлю');
+        }
     }
 
     /** Ограничение перебора паролей: 8 неудачных попыток за 15 минут с одного IP. */
@@ -149,7 +179,7 @@ final class AdminApi
         DB::update('admin_users', ['last_login' => DB::now()], 'id = :id', [':id' => $admin['id']]);
         self::setCookie(Crypto::sessionToken((int)$admin['id']), 43200);
         self::audit($admin['username'], 'login', $ip);
-        return ['ok' => true, 'username' => $admin['username']];
+        return ['ok' => true, 'username' => $admin['username'], 'role' => $admin['role'] ?? 'admin'];
     }
 
     public static function audit(string $actor, string $action, string $details = ''): void
@@ -724,6 +754,124 @@ final class AdminApi
         return ['ok' => true];
     }
 
+    // ───────────── ручная торговля ─────────────
+
+    /** Клиенты для ручной торговли: режим, статус движка, подключённая биржа, монеты, с которыми работает бот. */
+    private static function manualClients(): array
+    {
+        $rows = DB::all("SELECT u.id, u.username, u.first_name, b.running, b.manual_mode, b.trading_mode, b.symbols,
+                a.mode AS ex_mode, w.equity, w.status
+            FROM users u JOIN bot_settings b ON b.user_id = u.id
+            LEFT JOIN exchange_accounts a ON a.user_id = u.id
+            LEFT JOIN worker_state w ON w.user_id = u.id
+            WHERE u.blocked = 0 ORDER BY u.id DESC");
+        return array_map(fn($r) => ['id' => (int)$r['id'], 'name' => $r['first_name'] ?: ($r['username'] ?: ('#' . $r['id'])),
+            'username' => $r['username'], 'trading_mode' => $r['trading_mode'], 'running' => (bool)$r['running'],
+            'manual_mode' => (bool)$r['manual_mode'], 'exchange' => $r['ex_mode'] ? ($r['ex_mode'] === 'live' ? 'реальный' : 'демо Bybit') : null,
+            'symbols' => json_decode((string)$r['symbols'], true) ?: [], 'equity' => $r['equity'] !== null ? round((float)$r['equity'], 2) : null,
+            'status' => $r['status']], $rows);
+    }
+
+    /** Включает/выключает ручной режим клиенту: пока включён, автостратегии новых сделок не открывают. */
+    private static function manualMode(int $uid, array $b, string $admin): array
+    {
+        if (!DB::val('SELECT 1 FROM bot_settings WHERE user_id = ?', [$uid])) {
+            Api::fail(404, 'Клиент не найден');
+        }
+        $manual = (bool)($b['manual'] ?? false);
+        DB::update('bot_settings', ['manual_mode' => $manual], 'user_id = :u', [':u' => $uid]);
+        DB::insert('engine_commands', ['cmd' => 'restart_user', 'arg' => (string)$uid, 'created_at' => DB::now()]);
+        self::audit($admin, 'manual.mode', "$uid: " . ($manual ? 'ручной' : 'авто'));
+        return ['ok' => true, 'manual_mode' => $manual];
+    }
+
+    /** Текущая цена монеты (публичный тикер Bybit) — подсказка трейдеру при заполнении формы. */
+    private static function manualPrice(string $symbol): array
+    {
+        $symbol = strtoupper(trim($symbol));
+        if (!in_array($symbol, Settings::get('symbols'), true)) {
+            Api::fail(400, 'Неизвестная монета');
+        }
+        try {
+            $r = (new \App\Bybit())->get('/v5/market/tickers', ['category' => 'linear', 'symbol' => $symbol]);
+        } catch (\Throwable $e) {
+            Api::fail(502, 'Bybit: ' . $e->getMessage());
+        }
+        return ['symbol' => $symbol, 'price' => (float)($r['list'][0]['lastPrice'] ?? 0)];
+    }
+
+    /** Новый ручной ордер — становится в очередь manual_orders, исполняет демон (Manager::processManualOrders). */
+    private static function manualCreate(array $b, string $admin): array
+    {
+        $uid = (int)($b['user_id'] ?? 0);
+        if (!DB::val('SELECT 1 FROM users WHERE id = ? AND blocked = 0', [$uid])) {
+            Api::fail(404, 'Клиент не найден или заблокирован');
+        }
+        $symbol = strtoupper(trim((string)($b['symbol'] ?? '')));
+        if (!in_array($symbol, Settings::get('symbols'), true)) {
+            Api::fail(400, 'Неизвестная монета');
+        }
+        $side = in_array($b['side'] ?? '', ['Buy', 'Sell'], true) ? $b['side'] : null;
+        if (!$side) {
+            Api::fail(400, 'Сторона: Buy или Sell');
+        }
+        $type = in_array($b['order_type'] ?? '', ['market', 'limit'], true) ? $b['order_type'] : null;
+        if (!$type) {
+            Api::fail(400, 'Тип ордера: market или limit');
+        }
+        $qty = (float)($b['qty'] ?? 0);
+        if ($qty <= 0) {
+            Api::fail(400, 'Объём должен быть больше нуля');
+        }
+        $price = null;
+        if ($type === 'limit') {
+            $price = (float)($b['price'] ?? 0);
+            if ($price <= 0) {
+                Api::fail(400, 'Укажите цену лимитного ордера');
+            }
+        }
+        $sl = isset($b['stop_loss']) && $b['stop_loss'] !== '' && $b['stop_loss'] !== null ? (float)$b['stop_loss'] : null;
+        $tp = isset($b['take_profit']) && $b['take_profit'] !== '' && $b['take_profit'] !== null ? (float)$b['take_profit'] : null;
+        $lev = isset($b['leverage']) && $b['leverage'] !== '' && $b['leverage'] !== null ? max(1, min(125, (int)$b['leverage'])) : null;
+        $id = DB::insert('manual_orders', ['user_id' => $uid, 'symbol' => $symbol, 'side' => $side, 'order_type' => $type,
+            'qty' => $qty, 'price' => $price, 'stop_loss' => $sl, 'take_profit' => $tp, 'leverage' => $lev,
+            'status' => 'pending', 'created_by' => $admin, 'created_at' => DB::now()]);
+        self::audit($admin, 'manual.order', "клиент $uid: $symbol $side $type qty=$qty");
+        return ['ok' => true, 'id' => $id];
+    }
+
+    /** Журнал ручных ордеров: по клиенту (?user_id=) или общий, для опроса статуса из формы. */
+    private static function manualOrders(int $uid): array
+    {
+        $rows = $uid > 0
+            ? DB::all('SELECT o.*, u.first_name, u.username FROM manual_orders o JOIN users u ON u.id = o.user_id
+                WHERE o.user_id = ? ORDER BY o.id DESC LIMIT 50', [$uid])
+            : DB::all('SELECT o.*, u.first_name, u.username FROM manual_orders o JOIN users u ON u.id = o.user_id
+                ORDER BY o.id DESC LIMIT 100');
+        return array_map(fn($r) => ['id' => (int)$r['id'], 'user_id' => (int)$r['user_id'],
+            'client' => $r['first_name'] ?: ($r['username'] ?: ('#' . $r['user_id'])), 'symbol' => $r['symbol'], 'side' => $r['side'],
+            'order_type' => $r['order_type'], 'qty' => (float)$r['qty'], 'price' => $r['price'] !== null ? (float)$r['price'] : null,
+            'stop_loss' => $r['stop_loss'] !== null ? (float)$r['stop_loss'] : null,
+            'take_profit' => $r['take_profit'] !== null ? (float)$r['take_profit'] : null, 'leverage' => $r['leverage'],
+            'status' => $r['status'], 'error' => $r['error'], 'created_by' => $r['created_by'],
+            'created_at' => Api::iso($r['created_at']), 'done_at' => Api::iso($r['done_at'])], $rows);
+    }
+
+    /** Отмена ещё не исполненного (pending/open) ручного ордера — трейдер передумал или ошибся. */
+    private static function manualCancel(int $id, string $admin): array
+    {
+        $o = DB::row('SELECT status FROM manual_orders WHERE id = ?', [$id]);
+        if (!$o) {
+            Api::fail(404, 'Ордер не найден');
+        }
+        if (!in_array($o['status'], ['pending', 'open'], true)) {
+            Api::fail(400, 'Ордер уже не активен');
+        }
+        DB::update('manual_orders', ['status' => 'cancel_requested'], 'id = :id', [':id' => $id]);
+        self::audit($admin, 'manual.cancel', (string)$id);
+        return ['ok' => true];
+    }
+
     // ───────────── журнал ─────────────
 
     private static function logs(int $lines): array
@@ -745,8 +893,8 @@ final class AdminApi
 
     private static function admins(): array
     {
-        return array_map(fn($a) => ['id' => (int)$a['id'], 'username' => $a['username'], 'created_at' => Api::iso($a['created_at']),
-            'last_login' => Api::iso($a['last_login'])], DB::all('SELECT * FROM admin_users ORDER BY id'));
+        return array_map(fn($a) => ['id' => (int)$a['id'], 'username' => $a['username'], 'role' => $a['role'] ?? 'admin',
+            'created_at' => Api::iso($a['created_at']), 'last_login' => Api::iso($a['last_login'])], DB::all('SELECT * FROM admin_users ORDER BY id'));
     }
 
     private static function adminAdd(array $b, string $admin): array
@@ -756,11 +904,12 @@ final class AdminApi
             Api::fail(400, 'Логин: латиница, цифры, _ . -');
         }
         $pass = Api::str($b, 'password', 8, 128);
+        $role = ($b['role'] ?? 'admin') === 'trader' ? 'trader' : 'admin';
         if (DB::val('SELECT 1 FROM admin_users WHERE username = ?', [$user])) {
             Api::fail(400, 'Такой логин уже есть');
         }
-        DB::insert('admin_users', ['username' => $user, 'password_hash' => Crypto::hashPassword($pass), 'created_at' => DB::now()]);
-        self::audit($admin, 'admin.add', $user);
+        DB::insert('admin_users', ['username' => $user, 'password_hash' => Crypto::hashPassword($pass), 'role' => $role, 'created_at' => DB::now()]);
+        self::audit($admin, 'admin.add', "$user ($role)");
         return ['ok' => true];
     }
 

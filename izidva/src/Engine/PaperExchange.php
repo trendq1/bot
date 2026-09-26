@@ -54,6 +54,14 @@ final class PaperExchange implements ExchangeInterface
         }
         $qty = $o['reduce'] ? min($o['qty'], abs($size)) : $o['qty'];
         $this->trade($symbol, $o['side'], $qty, $o['price'], self::MAKER_FEE);
+        if (!$o['reduce']) {
+            if (($o['stop'] ?? null) !== null) {
+                $this->pos[$symbol]['stop'] = $o['stop'];
+            }
+            if (($o['take'] ?? null) !== null) {
+                $this->pos[$symbol]['take'] = $o['take'];
+            }
+        }
         $this->results[$id] = ['status' => 'Filled', 'avg_price' => $o['price'], 'filled_qty' => $qty];
     }
 
@@ -110,9 +118,11 @@ final class PaperExchange implements ExchangeInterface
 
     public function setLeverage(string $symbol, int $leverage): void {}
 
-    public function placeLimit(string $symbol, string $side, string $qty, string $price, string $linkId, bool $reduceOnly = false): void
+    public function placeLimit(string $symbol, string $side, string $qty, string $price, string $linkId, bool $reduceOnly = false,
+                               ?string $stop = null, ?string $take = null): void
     {
-        $this->orders[$symbol][$linkId] = ['side' => $side, 'qty' => (float)$qty, 'price' => (float)$price, 'reduce' => $reduceOnly];
+        $this->orders[$symbol][$linkId] = ['side' => $side, 'qty' => (float)$qty, 'price' => (float)$price, 'reduce' => $reduceOnly,
+            'stop' => $stop !== null ? (float)$stop : null, 'take' => $take !== null ? (float)$take : null];
         $this->results[$linkId] = ['status' => 'New', 'avg_price' => 0.0, 'filled_qty' => 0.0];
     }
 

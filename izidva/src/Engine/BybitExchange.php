@@ -61,11 +61,21 @@ final class BybitExchange implements ExchangeInterface
         }
     }
 
-    public function placeLimit(string $symbol, string $side, string $qty, string $price, string $linkId, bool $reduceOnly = false): void
+    public function placeLimit(string $symbol, string $side, string $qty, string $price, string $linkId, bool $reduceOnly = false,
+                               ?string $stop = null, ?string $take = null): void
     {
-        $this->api->post('/v5/order/create', ['category' => 'linear', 'symbol' => $symbol, 'side' => $side,
-            'orderType' => 'Limit', 'qty' => $qty, 'price' => $price, 'timeInForce' => 'GTC', 'orderLinkId' => $linkId,
-            'reduceOnly' => $reduceOnly, 'positionIdx' => 0]);
+        $body = ['category' => 'linear', 'symbol' => $symbol, 'side' => $side, 'orderType' => 'Limit', 'qty' => $qty,
+            'price' => $price, 'timeInForce' => 'GTC', 'orderLinkId' => $linkId, 'reduceOnly' => $reduceOnly, 'positionIdx' => 0];
+        if ($stop !== null || $take !== null) {
+            $body['tpslMode'] = 'Full';
+        }
+        if ($stop !== null) {
+            $body['stopLoss'] = $stop;
+        }
+        if ($take !== null) {
+            $body['takeProfit'] = $take;
+        }
+        $this->api->post('/v5/order/create', $body);
     }
 
     public function placeMarket(string $symbol, string $side, string $qty, ?string $stop = null, ?string $take = null, bool $reduceOnly = false): void

@@ -29,7 +29,7 @@ function table(cols, rows, onRow) {
 // ───────────── вход ─────────────
 function showLogin() { $("appView").hidden = true; $("loginView").hidden = false; }
 $("lBtn").onclick = async () => {
-  try { const r = await post("/login", { username: $("lUser").value, password: $("lPass").value }); $("lPass").value = ""; start(r.username); }
+  try { const r = await post("/login", { username: $("lUser").value, password: $("lPass").value }); $("lPass").value = ""; start(r.username, r.role); }
   catch (e) { $("lErr").textContent = e.message; }
 };
 $("lPass").addEventListener("keydown", (e) => e.key === "Enter" && $("lBtn").click());
@@ -50,8 +50,16 @@ function go(v) {
   location.hash = v;
   VIEWS[v]().catch((e) => ($("view").innerHTML = `<div class="card note err">${esc(e.message)}</div>`));
 }
-function start(name) {
-  $("meName").textContent = "👤 " + name; $("loginView").hidden = true; $("appView").hidden = false;
+let myRole = "admin";
+function start(name, role) {
+  myRole = role || "admin";
+  $("meName").textContent = "👤 " + name + (myRole === "trader" ? " · трейдер" : "");
+  $("loginView").hidden = true; $("appView").hidden = false;
+  if (myRole === "trader") {
+    document.querySelectorAll("#nav button").forEach((b) => (b.hidden = b.dataset.v !== "manual"));
+    go("manual");
+    return;
+  }
   const v = location.hash.slice(1);
   go(v in VIEWS ? v : "overview");
 }
@@ -403,6 +411,104 @@ VIEWS.menu = async () => {
   }));
 };
 
+// ───────────── ручная торговля ─────────────
+const MN_STATUS = { pending: "в очереди", open: "лимит выставлен", filled: "исполнен", done: "исполнен", cancelled: "отменён",
+  cancel_requested: "отмена…", error: "ошибка" };
+const MN_CLASS = { filled: "ok", done: "ok", error: "bad", cancelled: "warn", cancel_requested: "warn" };
+let mnClients = [], mnTimer = null;
+VIEWS.manual = async () => {
+  clearInterval(mnTimer);
+  mnClients = await api("/manual/clients");
+  if (!mnClients.length) { $("view").innerHTML = `<div class="card muted">Пока нет ни одного клиента.</div>`; return; }
+  $("view").innerHTML = `
+    <div class="card">
+      <h3>Клиент</h3>
+      <select id="mnClient">${mnClients.map((c) => `<option value="${c.id}">${esc(c.name)}${c.username ? " · @" + esc(c.username) : ""} — ${
+        c.trading_mode === "exchange" ? (c.exchange || "биржа не подключена") : "демо"}${c.running ? "" : " · бот остановлен"}</option>`).join("")}</select>
+      <div id="mnInfo" class="muted small" style="margin-top:8px"></div>
+      <button class="btn" id="mnToggle" style="margin-top:10px"></button>
+    </div>
+    <div class="card" style="max-width:680px">
+      <h3>Новый ордер</h3>
+      <div class="grid2">
+        <label>Монета<select id="mnSymbol"></select></label>
+        <label>Текущая цена<div class="row"><input class="inp" id="mnPrice0" readonly placeholder="—"><button class="btn" type="button" id="mnRefreshPrice">↻</button></div></label>
+      </div>
+      <div class="seg" id="mnSide"><button data-v="Buy">🟢 Buy / Long</button><button data-v="Sell">🔴 Sell / Short</button></div>
+      <div class="seg" id="mnType"><button data-v="market">По рынку</button><button data-v="limit">Лимит</button></div>
+      <div class="grid2">
+        <label id="mnPriceWrap" hidden>Цена лимитного ордера<input class="inp" id="mnLimitPrice" type="number" step="any"></label>
+        <label>Объём, монета<input class="inp" id="mnQty" type="number" step="any" placeholder="0.01"></label>
+        <label>Стоп-лосс (необязательно)<input class="inp" id="mnSl" type="number" step="any"></label>
+        <label>Тейк-профит (необязательно)<input class="inp" id="mnTp" type="number" step="any"></label>
+        <label>Плечо (необязательно)<input class="inp" id="mnLev" type="number" min="1" max="125" placeholder="как сейчас у клиента"></label>
+      </div>
+      <button class="btn primary big" id="mnSend" style="margin-top:10px">Отправить ордер</button>
+      <div class="note" id="mnRes"></div>
+    </div>
+    <div class="card"><h3>Ордера этого клиента</h3><div id="mnOrders">—</div></div>`;
+  const client = () => mnClients.find((c) => c.id === Number($("mnClient").value));
+  function renderInfo() {
+    const c = client();
+    $("mnSymbol").innerHTML = c.symbols.map((s) => `<option value="${s}">${s}</option>`).join("");
+    $("mnInfo").innerHTML = `Режим: <b>${c.manual_mode ? "ручной (автотрейдинг выключен)" : "автотрейдинг"}</b> · бот ${c.running ? "работает" : "остановлен"}` +
+      (c.equity != null ? ` · баланс ${usd(c.equity)}` : "") + (c.status ? ` · ${esc(c.status)}` : "");
+    $("mnToggle").textContent = c.manual_mode ? "▶ Включить автотрейдинг" : "✋ Выключить автотрейдинг (ручной режим)";
+    $("mnToggle").className = "btn " + (c.manual_mode ? "primary" : "danger");
+    $("mnPrice0").value = "";
+    loadOrders();
+  }
+  $("mnClient").onchange = renderInfo;
+  $("mnToggle").onclick = async () => {
+    const c = client();
+    if (!confirm(c.manual_mode ? "Включить автотрейдинг для этого клиента?" : "Выключить автотрейдинг? Сделки будет открывать только трейдер.")) return;
+    try { await post(`/manual/mode/${c.id}`, { manual: !c.manual_mode }); toast("Готово"); await VIEWS.manual(); }
+    catch (e) { toast(e.message); }
+  };
+  $("mnSide").querySelectorAll("button").forEach((b, i) => { b.classList.toggle("on", i === 0); b.onclick = () => $("mnSide").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b)); });
+  $("mnType").querySelectorAll("button").forEach((b, i) => {
+    b.classList.toggle("on", i === 0);
+    b.onclick = () => { $("mnType").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b)); $("mnPriceWrap").hidden = b.dataset.v !== "limit"; };
+  });
+  $("mnRefreshPrice").onclick = async () => {
+    try { const r = await api("/manual/price?symbol=" + $("mnSymbol").value); $("mnPrice0").value = r.price; } catch (e) { toast(e.message); }
+  };
+  $("mnSend").onclick = async () => {
+    const c = client();
+    const side = $("mnSide").querySelector("button.on").dataset.v;
+    const type = $("mnType").querySelector("button.on").dataset.v;
+    const qty = Number($("mnQty").value);
+    if (!qty || qty <= 0) { toast("Укажите объём"); return; }
+    if (type === "limit" && !Number($("mnLimitPrice").value)) { toast("Укажите цену лимитного ордера"); return; }
+    if (!confirm(`Отправить ${type === "market" ? "рыночный" : "лимитный"} ордер ${side} по ${$("mnSymbol").value} клиенту «${c.name}»?`)) return;
+    try {
+      await post("/manual/order", { user_id: c.id, symbol: $("mnSymbol").value, side, order_type: type, qty,
+        price: type === "limit" ? Number($("mnLimitPrice").value) : null,
+        stop_loss: $("mnSl").value || null, take_profit: $("mnTp").value || null, leverage: $("mnLev").value || null });
+      $("mnRes").className = "note ok"; $("mnRes").textContent = "Ордер поставлен в очередь — движок исполнит его в течение нескольких секунд.";
+      $("mnQty").value = ""; $("mnSl").value = ""; $("mnTp").value = ""; $("mnLev").value = ""; $("mnLimitPrice").value = "";
+      loadOrders();
+    } catch (e) { $("mnRes").className = "note err"; $("mnRes").textContent = e.message; }
+  };
+  async function loadOrders() {
+    const c = client();
+    const rows = await api("/manual/orders?user_id=" + c.id);
+    $("mnOrders").innerHTML = table(["Когда", "Монета", "Сторона", "Тип", "Объём", "Цена / SL / TP", "Плечо", "Статус", "Кто", ""], rows.map((o) =>
+      `<tr><td>${dt(o.created_at)}</td><td>${o.symbol}</td><td class="${o.side === "Buy" ? "pos" : "neg"}">${o.side}</td><td>${o.order_type === "limit" ? "лимит" : "рынок"}</td>
+        <td class="num">${o.qty}</td><td class="num small">${o.price ?? "рынок"}${o.stop_loss ? " · SL " + o.stop_loss : ""}${o.take_profit ? " · TP " + o.take_profit : ""}</td>
+        <td class="num">${o.leverage ? "×" + o.leverage : "—"}</td>
+        <td><span class="tag ${MN_CLASS[o.status] || ""}">${MN_STATUS[o.status] || o.status}</span>${o.status === "error" && o.error ? `<div class="muted small">${esc(o.error)}</div>` : ""}</td>
+        <td class="muted small">${esc(o.created_by)}</td>
+        <td>${["pending", "open"].includes(o.status) ? `<button class="btn danger" data-cancel="${o.id}">✕</button>` : ""}</td></tr>`));
+    $("mnOrders").querySelectorAll("[data-cancel]").forEach((b) => (b.onclick = async () => {
+      if (!confirm("Отменить ордер?")) return;
+      try { await post(`/manual/orders/${b.dataset.cancel}/cancel`); loadOrders(); } catch (e) { toast(e.message); }
+    }));
+  }
+  renderInfo();
+  mnTimer = setInterval(() => { if (current === "manual") loadOrders().catch(() => {}); }, 4000);
+};
+
 // ───────────── настройки ─────────────
 VIEWS.settings = async () => {
   const fields = await api("/settings");
@@ -451,18 +557,21 @@ VIEWS.logs = async () => {
 // ───────────── администраторы ─────────────
 VIEWS.admins = async () => {
   const rows = await api("/admins");
+  const ROLE = { admin: "администратор", trader: "трейдер" };
   $("view").innerHTML = `<div class="grid cols2">
-    <div class="card"><h3>Администраторы</h3>${table(["Логин", "Создан", "Последний вход", ""], rows.map((a) =>
-      `<tr><td>${esc(a.username)}</td><td>${dt(a.created_at)}</td><td>${dt(a.last_login)}</td><td><button class="btn danger" data-del="${a.id}">✕</button></td></tr>`))}
-      <h3 style="margin-top:14px">Добавить</h3><div class="grid2"><input class="inp" id="aUser" placeholder="логин"><input class="inp" id="aPass" type="password" placeholder="пароль от 8 символов"></div>
-      <button class="btn primary" id="aAdd" style="margin-top:8px">Добавить администратора</button></div>
+    <div class="card"><h3>Администраторы</h3>${table(["Логин", "Роль", "Создан", "Последний вход", ""], rows.map((a) =>
+      `<tr><td>${esc(a.username)}</td><td><span class="tag ${a.role === "trader" ? "warn" : "ok"}">${ROLE[a.role] || a.role}</span></td><td>${dt(a.created_at)}</td><td>${dt(a.last_login)}</td><td><button class="btn danger" data-del="${a.id}">✕</button></td></tr>`))}
+      <h3 style="margin-top:14px">Добавить</h3>
+      <div class="grid2"><input class="inp" id="aUser" placeholder="логин"><input class="inp" id="aPass" type="password" placeholder="пароль от 8 символов"></div>
+      <label>Роль<select id="aRole"><option value="admin">Администратор — полный доступ</option><option value="trader">Трейдер — только ручная торговля</option></select></label>
+      <button class="btn primary" id="aAdd" style="margin-top:8px">Добавить</button></div>
     <div class="card"><h3>Сменить мой пароль</h3>
       <label>Текущий пароль<input class="inp" id="pOld" type="password"></label><label>Новый пароль<input class="inp" id="pNew" type="password"></label>
       <button class="btn primary" id="pSave" style="margin-top:10px">Сменить</button></div></div>`;
-  $("aAdd").onclick = async () => { try { await post("/admins", { username: $("aUser").value, password: $("aPass").value }); toast("Добавлен"); go("admins"); } catch (e) { toast(e.message); } };
+  $("aAdd").onclick = async () => { try { await post("/admins", { username: $("aUser").value, password: $("aPass").value, role: $("aRole").value }); toast("Добавлен"); go("admins"); } catch (e) { toast(e.message); } };
   $("pSave").onclick = async () => { try { await post("/admins/password", { old_password: $("pOld").value, new_password: $("pNew").value }); toast("Пароль изменён"); $("pOld").value = $("pNew").value = ""; } catch (e) { toast(e.message); } };
   $("view").querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => { if (!confirm("Удалить администратора?")) return; try { await api("/admins/" + b.dataset.del, { method: "DELETE" }); go("admins"); } catch (e) { toast(e.message); } }));
 };
 
 // ───────────── старт ─────────────
-api("/me").then((r) => start(r.username)).catch(() => showLogin());
+api("/me").then((r) => start(r.username, r.role)).catch(() => showLogin());

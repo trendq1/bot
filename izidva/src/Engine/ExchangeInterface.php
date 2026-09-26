@@ -14,7 +14,8 @@ interface ExchangeInterface
     /** @return array<string,array{side:string,qty:float,entry:float}> */
     public function positions(): array;
     public function setLeverage(string $symbol, int $leverage): void;
-    public function placeLimit(string $symbol, string $side, string $qty, string $price, string $linkId, bool $reduceOnly = false): void;
+    public function placeLimit(string $symbol, string $side, string $qty, string $price, string $linkId, bool $reduceOnly = false,
+                               ?string $stop = null, ?string $take = null): void;
     public function placeMarket(string $symbol, string $side, string $qty, ?string $stop = null, ?string $take = null, bool $reduceOnly = false): void;
     public function cancel(string $symbol, string $linkId): void;
     public function cancelAll(string $symbol): void;

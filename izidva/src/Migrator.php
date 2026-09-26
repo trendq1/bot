@@ -34,8 +34,8 @@ final class Migrator
                 try {
                     $pdo->exec($stmt);
                 } catch (PDOException $e) {
-                    // повторный запуск после частичного сбоя: таблица/индекс уже есть — не ошибка
-                    if (!in_array((int)($e->errorInfo[1] ?? 0), [1050, 1061], true)) {
+                    // повторный запуск после частичного сбоя: таблица/колонка/индекс уже есть — не ошибка
+                    if (!in_array((int)($e->errorInfo[1] ?? 0), [1050, 1060, 1061], true)) {
                         throw new \RuntimeException(basename($file) . ': ' . $e->getMessage(), 0, $e);
                     }
                 }
