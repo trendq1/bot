@@ -100,6 +100,17 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         $pass = Api::str($b, 'admin_password', 8, 128);
 
         Migrator::run($pdo);
+        // Защита от «потерялся storage/.env — мастер молча сгенерирует новый ключ поверх старых данных»:
+        // если в базе уже есть администраторы, это не первая установка, а восстановление после утери .env.
+        // Новый APP_KEY навсегда испортит всё, что зашифровано старым (токены, ключи API, ключи бирж клиентов).
+        $existingAdmins = (int)$pdo->query('SELECT COUNT(*) FROM admin_users')->fetchColumn();
+        if ($existingAdmins > 0 && empty($b['confirm_overwrite'])) {
+            Api::fail(409, "В этой базе уже есть $existingAdmins администратор(ов) — похоже, проект уже был установлен, "
+                . 'а файл storage/.env потерялся (например, при повторной распаковке архива). Создание нового ключа '
+                . 'сделает НЕЧИТАЕМЫМИ все сохранённые токены, ключ Anthropic и ключи Bybit клиентов — их придётся вводить заново, '
+                . 'а клиентам с реальным Bybit — переподключать биржу. Если есть резервная копия storage/.env, восстановите её '
+                . 'вместо продолжения установки.');
+        }
         Env::write(['DB_HOST' => (string)$db['host'], 'DB_PORT' => (string)(int)$db['port'], 'DB_NAME' => (string)$db['name'],
             'DB_USER' => (string)$db['user'], 'DB_PASS' => (string)$db['password'],
             'APP_KEY' => Crypto::newKey(), 'SECRET_KEY' => bin2hex(random_bytes(32))]);
@@ -221,7 +232,7 @@ const $ = (id) => document.getElementById(id);
 async function post(body) {
   const r = await fetch("migrate.php", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), credentials: "same-origin" });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.detail || "Ошибка " + r.status);
+  if (!r.ok) { const err = new Error(d.detail || "Ошибка " + r.status); err.status = r.status; throw err; }
   return d;
 }
 function show(id, text, ok) { const el = $(id); el.textContent = text; el.className = "note " + (ok ? "ok" : "err"); }
@@ -231,13 +242,25 @@ if ($("testDb")) $("testDb").onclick = async () => {
   try { const r = await post({ action: "test_db", code: $("code").value, db: db() }); show("dbResult", "✅ Подключено: " + r.version, true); }
   catch (e) { show("dbResult", "❌ " + e.message, false); }
 };
+async function doInstall(confirmOverwrite) {
+  return post({ action: "install", code: $("code").value, db: db(), admin_username: $("adUser").value.trim(),
+    admin_password: $("adPass").value, bot_token: $("botToken").value.trim(), webapp_url: $("webappUrl").value.trim(),
+    anthropic_api_key: $("aiKey").value.trim(), confirm_overwrite: !!confirmOverwrite });
+}
 if ($("install")) $("install").onclick = async () => {
   if ($("adPass").value !== $("adPass2").value) return show("result", "❌ Пароли не совпадают", false);
   const btn = $("install"); btn.disabled = true; btn.textContent = "Устанавливаем…";
   try {
-    const r = await post({ action: "install", code: $("code").value, db: db(), admin_username: $("adUser").value.trim(),
-      admin_password: $("adPass").value, bot_token: $("botToken").value.trim(), webapp_url: $("webappUrl").value.trim(),
-      anthropic_api_key: $("aiKey").value.trim() });
+    let r;
+    try {
+      r = await doInstall(false);
+    } catch (e) {
+      if (e.status === 409 && confirm(e.message + "\n\nВсё равно продолжить и создать новый ключ шифрования?")) {
+        r = await doInstall(true);
+      } else {
+        throw e;
+      }
+    }
     show("result", r.telegram ? "✅ " + r.telegram : "", !!r.telegram && !r.telegram.startsWith("Telegram:"));
     $("cmd").textContent = r.service_command;
     document.querySelectorAll(".card:not(#done)").forEach((c) => (c.hidden = true));
