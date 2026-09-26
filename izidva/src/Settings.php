@@ -27,10 +27,10 @@ final class Settings
         'paper_start_balance' => ['float', 1000.0, 'Стартовый демо-баланс, $', 'Торговля', false, ''],
         'engine_enabled' => ['bool', true, 'Торговый движок включён', 'Торговля', false, ''],
         'maintenance' => ['bool', false, 'Техобслуживание (запрет запуска ботов)', 'Торговля', false, ''],
-        'price_week_stars' => ['int', 250, 'Цена 7 дней, ⭐', 'Тарифы', false, ''],
-        'price_month_stars' => ['int', 750, 'Цена 30 дней, ⭐', 'Тарифы', false, ''],
-        'price_quarter_stars' => ['int', 1900, 'Цена 90 дней, ⭐', 'Тарифы', false, ''],
-        'stars_usd_rate' => ['float', 0.013, 'Курс 1 ⭐ в $ (для учёта доходов)', 'Тарифы', false, ''],
+        'price_month_usd' => ['float', 15.0, 'Аренда бота на 1 месяц, $', 'Тарифы', false, ''],
+        'price_half_year_usd' => ['float', 50.0, 'Аренда бота на 6 месяцев, $', 'Тарифы', false, ''],
+        'price_year_usd' => ['float', 90.0, 'Аренда бота на 1 год, $', 'Тарифы', false, ''],
+        'stars_usd_rate' => ['float', 0.013, 'Курс 1 ⭐ в $ (для пересчёта цены в звёзды)', 'Тарифы', false, ''],
         'nowpayments_enabled' => ['bool', false, 'Оплата криптовалютой (NOWPayments) включена', 'NOWPayments (крипта)', false,
             'показывает клиенту вариант «Оплатить криптой» рядом со звёздами'],
         'nowpayments_api_key' => ['str', '', 'API-ключ NOWPayments', 'NOWPayments (крипта)', true, 'личный кабинет NOWPayments → API keys'],
@@ -109,14 +109,17 @@ final class Settings
         self::$cache = null;
     }
 
+    /** Аренда бота: 1 месяц / 6 месяцев / 1 год. Цены в $ задаются в админке, звёзды считаются по курсу stars_usd_rate. */
     public static function plans(): array
     {
         $s = self::all();
-        $usd = fn(int $stars) => round($stars * (float)$s['stars_usd_rate'], 2);
+        $rate = (float)$s['stars_usd_rate'] ?: 0.013;
+        $mk = fn(string $code, string $title, int $days, float $usd) => ['code' => $code, 'title' => $title, 'days' => $days,
+            'usd' => round($usd, 2), 'stars' => max(1, (int)ceil($usd / $rate))];
         return [
-            ['code' => 'week', 'title' => '7 дней', 'days' => 7, 'stars' => $s['price_week_stars'], 'usd' => $usd($s['price_week_stars'])],
-            ['code' => 'month', 'title' => '30 дней', 'days' => 30, 'stars' => $s['price_month_stars'], 'usd' => $usd($s['price_month_stars'])],
-            ['code' => 'quarter', 'title' => '90 дней', 'days' => 90, 'stars' => $s['price_quarter_stars'], 'usd' => $usd($s['price_quarter_stars'])],
+            $mk('month', '1 месяц', 30, (float)$s['price_month_usd']),
+            $mk('half_year', '6 месяцев', 182, (float)$s['price_half_year_usd']),
+            $mk('year', '1 год', 365, (float)$s['price_year_usd']),
         ];
     }
 

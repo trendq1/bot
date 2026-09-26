@@ -342,9 +342,18 @@ test('синхронизация клиентов с БД', function () {
 });
 
 echo "Оплата криптовалютой (NOWPayments)\n";
-test('тарифы содержат usd-эквивалент для крипто-оплаты', function () {
-    $p = Settings::plan('week');
-    check($p['usd'] > 0 && abs($p['usd'] - $p['stars'] * (float)Settings::get('stars_usd_rate')) < 0.01, 'usd считается по курсу звезды из настроек');
+test('тарифы аренды бота: 1 месяц/6 месяцев/1 год, цена в $ из настроек, звёзды — по курсу', function () {
+    Settings::save(['price_month_usd' => 15, 'price_half_year_usd' => 50, 'price_year_usd' => 90]);
+    $rate = (float)Settings::get('stars_usd_rate');
+    $plans = Settings::plans();
+    check(array_column($plans, 'code') === ['month', 'half_year', 'year'], 'три тарифа в нужном порядке');
+    check(array_column($plans, 'days') === [30, 182, 365], 'срок в днях');
+    [$month, $halfYear, $year] = $plans;
+    check($month['usd'] === 15.0 && $halfYear['usd'] === 50.0 && $year['usd'] === 90.0, 'цена в $ берётся из настроек как есть');
+    foreach ($plans as $p) {
+        check($p['stars'] >= $p['usd'] / $rate && $p['stars'] < $p['usd'] / $rate + 1, "$p[code]: звёзды округлены вверх по курсу от цены в \$");
+    }
+    check(Settings::plan('month')['usd'] === 15.0, 'Settings::plan() находит тариф по коду');
 });
 test('подпись IPN проверяется по HMAC-SHA512 отсортированного JSON', function () {
     Settings::save(['nowpayments_ipn_secret' => 'test-ipn-secret']);

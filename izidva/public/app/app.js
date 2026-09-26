@@ -323,7 +323,7 @@ $("langSeg").querySelectorAll("button").forEach((b) => {
 function renderSettings() {
   const me = state.me; if (!me) return;
   const s = me.settings;
-  const planTitle = { week: t("plan_week"), month: t("plan_month"), quarter: t("plan_quarter") };
+  const planTitle = { month: t("plan_month"), half_year: t("plan_half_year"), year: t("plan_year") };
   state.draft = { trading_mode: s.trading_mode, risk_profile: s.risk_profile, symbols: [...s.symbols], strategies: { ...s.strategies } };
   const d = state.draft;
   const seg = (id, val, attr = "v") => $(id).querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset[attr] === val));
@@ -352,7 +352,7 @@ function renderSettings() {
   const u = me.user;
   $("subBadge").textContent = u.has_subscription ? t("sub_until", { date: new Date(u.subscription_until).toLocaleDateString(locale()) }) : t("none");
   $("subBadge").className = "badge" + (u.has_subscription ? " ok" : "");
-  $("plans").innerHTML = me.options.plans.map((p) => `<button class="plan" data-plan="${p.code}"><b>${esc(planTitle[p.code] || p.title)}</b><span>${state.payMethod === "crypto" ? "≈ $" + p.usd : "⭐ " + p.stars}</span></button>`).join("");
+  $("plans").innerHTML = me.options.plans.map((p) => `<button class="plan" data-plan="${p.code}"><b>${esc(planTitle[p.code] || p.title)}</b><span>${state.payMethod === "crypto" ? "$" + p.usd : "⭐ " + p.stars}</span></button>`).join("");
   $("plans").querySelectorAll(".plan").forEach((el) => el.addEventListener("click", () => buy(el.dataset.plan)));
   $("paySeg").hidden = !me.options.crypto_pay;
   if (me.options.crypto_pay) {
