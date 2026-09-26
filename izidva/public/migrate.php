@@ -202,6 +202,11 @@ $e = fn($s) => htmlspecialchars((string)$s, ENT_QUOTES);
   </div>
   <button class="btn primary big" id="install">Установить</button>
   <div class="note" id="result"></div>
+  <div class="card note err" id="overwriteWarn" hidden>
+    <p id="overwriteMsg"></p>
+    <button class="btn danger" id="overwriteYes" style="margin-top:8px">Да, всё равно создать новый ключ</button>
+    <button class="btn ghost" id="overwriteNo" style="margin-top:8px">Отмена</button>
+  </div>
   <div class="card" id="done" hidden>
     <h3>✅ Установка завершена</h3>
     <p><b>Последний шаг — запустить торговый движок.</b> Он работает постоянно (не через cron). Выполните один раз в терминале сервера:</p>
@@ -247,29 +252,36 @@ async function doInstall(confirmOverwrite) {
     admin_password: $("adPass").value, bot_token: $("botToken").value.trim(), webapp_url: $("webappUrl").value.trim(),
     anthropic_api_key: $("aiKey").value.trim(), confirm_overwrite: !!confirmOverwrite });
 }
-if ($("install")) $("install").onclick = async () => {
-  if ($("adPass").value !== $("adPass2").value) return show("result", "❌ Пароли не совпадают", false);
+function finishInstall(r) {
+  if (r.telegram) {
+    const ok = !r.telegram.startsWith("Telegram:");
+    show("result", (ok ? "✅ " : "⚠️ ") + r.telegram, ok);
+  }
+  $("cmd").textContent = r.service_command;
+  document.querySelectorAll(".card:not(#done)").forEach((c) => (c.hidden = true));
+  $("install").hidden = true; $("done").hidden = false;
+}
+async function runInstall(confirmOverwrite) {
   const btn = $("install"); btn.disabled = true; btn.textContent = "Устанавливаем…";
+  $("overwriteWarn").hidden = true;
   try {
-    let r;
-    try {
-      r = await doInstall(false);
-    } catch (e) {
-      if (e.status === 409 && confirm(e.message + "\n\nВсё равно продолжить и создать новый ключ шифрования?")) {
-        r = await doInstall(true);
-      } else {
-        throw e;
-      }
+    finishInstall(await doInstall(confirmOverwrite));
+  } catch (e) {
+    if (e.status === 409 && !confirmOverwrite) {
+      $("overwriteMsg").textContent = e.message;
+      $("overwriteWarn").hidden = false;
+      btn.disabled = false; btn.textContent = "Установить";
+      return;
     }
-    if (r.telegram) {
-      const ok = !r.telegram.startsWith("Telegram:");
-      show("result", (ok ? "✅ " : "⚠️ ") + r.telegram, ok);
-    }
-    $("cmd").textContent = r.service_command;
-    document.querySelectorAll(".card:not(#done)").forEach((c) => (c.hidden = true));
-    btn.hidden = true; $("done").hidden = false;
-  } catch (e) { show("result", "❌ " + e.message, false); btn.disabled = false; btn.textContent = "Установить"; }
+    show("result", "❌ " + e.message, false); btn.disabled = false; btn.textContent = "Установить";
+  }
+}
+if ($("install")) $("install").onclick = () => {
+  if ($("adPass").value !== $("adPass2").value) return show("result", "❌ Пароли не совпадают", false);
+  runInstall(false);
 };
+if ($("overwriteYes")) $("overwriteYes").onclick = () => runInstall(true);
+if ($("overwriteNo")) $("overwriteNo").onclick = () => { $("overwriteWarn").hidden = true; };
 if ($("migrate")) $("migrate").onclick = async () => {
   try { const r = await post({ action: "migrate" }); show("result", "✅ Применено: " + (r.applied.join(", ") || "ничего"), true); setTimeout(() => location.reload(), 1500); }
   catch (e) { show("result", "❌ " + e.message, false); }
