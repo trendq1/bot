@@ -465,6 +465,24 @@ test('ручной режим: автостратегии не открываю�
     $w->step(microtime(true));
     check(!isset($w->grids['BTCUSDT']), 'сетка не запускается, пока клиент переведён в ручной режим');
 });
+test('досрочный выход из тренда при развороте, не дожидаясь стопа', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 100000.0;
+    $brain = new Brain(new Learner());
+    $brain->features['BTCUSDT'] = ['price' => 100000.0, 'atr' => 500.0, 'ema20' => 100000, 'ema20_1' => 100000, 'last_closed_ts' => 1.0, 'vwap_4h' => 100000];
+    $brain->insights['BTCUSDT'] = ['regime' => 'trend_down', 'confidence' => 0.8, 'w_grid' => 0.1, 'w_trend' => 1.0, 'w_liquidation' => 0.1,
+        'grid_mode' => 'off', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 100000.0]);
+    $ex->placeMarket('BTCUSDT', 'Buy', '0.01');                // позиция уже на бирже, без движения цены к стопу
+    $w = new Worker(784, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->directional['BTCUSDT'] = ['strategy' => 'trend', 'side' => 'Buy', 'entry' => 100000.0, 'stop' => 95000.0, 'qty' => 0.01,
+        'regime' => 'trend_up', 'opened_ms' => (int)(microtime(true) * 1000) - 120_000, 'risk_usd' => 50.0];
+    $w->step(microtime(true));
+    check($ex->positions() === [], 'позиция закрыта, увидев смену режима на противоположный тренд — стоп ещё далеко');
+});
 
 echo "\n";
 if ($failed) {

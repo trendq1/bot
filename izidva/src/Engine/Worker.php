@@ -105,6 +105,7 @@ final class Worker
             $this->ex->setLeverage($sym, (int)min($this->prof['leverage'], $inst->maxLeverage));
             $this->leverageSet[$sym] = true;
         }
+        $this->checkReversal($sym, $ins, $positions);
         $w = $this->weights($sym, $ins);
         $tuning = $this->brain->tuning[$sym] ?? [];
 
@@ -174,6 +175,33 @@ final class Worker
     {
         $this->recordTrade($sym, 'grid', $ev['side'], $ev['qty'], $ev['entry'], $ev['exit'], $ev['pnl'],
             $ev['pnl'] / $grid->unitRisk(), $regime, $ev['kind'] === 'stop');
+    }
+
+    /**
+     * Досрочный выход из направленной сделки (тренд/ликвидации), если рынок развернулся против позиции —
+     * не ждём полного стопа или тейка. Не трогает ручные сделки трейдера и сетки (у них своя логика выхода).
+     */
+    private function checkReversal(string $sym, array $ins, array $positions): void
+    {
+        $d = $this->directional[$sym] ?? null;
+        if (!$d || $d['strategy'] === 'manual' || !isset($positions[$sym])) {
+            return;
+        }
+        $nowMs = (int)(microtime(true) * 1000);
+        if ($nowMs - $d['opened_ms'] < 60_000) {
+            return;                                          // не дёргаемся в первую минуту после входа
+        }
+        $long = $d['side'] === 'Buy';
+        $reversed = $long ? $ins['regime'] === 'trend_down' : $ins['regime'] === 'trend_up';
+        if (!$reversed) {
+            return;
+        }
+        try {
+            $this->ex->closePosition($sym);                 // закрытие увидит checkDirectional на следующем такте и запишет сделку
+            Log::info("user {$this->userId}: $sym закрыт досрочно — разворот тренда против позиции ({$ins['regime']})");
+        } catch (\Throwable $e) {
+            Log::error("user {$this->userId}: не удалось закрыть $sym при развороте: " . $e->getMessage());
+        }
     }
 
     private function openDirectional(string $sym, array $s, array $ins, float $weight): void
@@ -343,9 +371,14 @@ final class Worker
             $closed = $this->ex->closedPnl($sym, $d['opened_ms'] - 1000);
             $pnl = array_sum(array_column($closed, 'pnl'));
             $exit = $closed ? end($closed)['exit'] : $d['entry'];
+            $r = $d['risk_usd'] ? $pnl / $d['risk_usd'] : 0.0;
             unset($this->directional[$sym]);
-            $this->recordTrade($sym, $d['strategy'], $d['side'], $d['qty'], $d['entry'], $exit, $pnl,
-                $d['risk_usd'] ? $pnl / $d['risk_usd'] : 0.0, $d['regime'], true);
+            if ($r < -1.3) {
+                // Стоп должен ограничивать убыток примерно 1R — заметный перебор стоит разобрать по этим числам.
+                Log::warn(sprintf('user %d: %s %s — убыток %.2fR больше расчётного риска (вход %s, стоп %s, выход %s, объём %s)',
+                    $this->userId, $sym, $d['strategy'], $r, self::fmt($d['entry']), self::fmt($d['stop']), self::fmt($exit), self::fmt($d['qty'])));
+            }
+            $this->recordTrade($sym, $d['strategy'], $d['side'], $d['qty'], $d['entry'], $exit, $pnl, $r, $d['regime'], true);
         }
     }
 
