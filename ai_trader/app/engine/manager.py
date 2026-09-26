@@ -153,7 +153,8 @@ class EngineManager:
             )).all()
         should_run = {}
         for bs, user, acc in rows:
-            ok = bs.running and (bs.trading_mode == "paper" or (acc is not None and user.has_subscription()))
+            ok = bs.running and not user.blocked and (
+                bs.trading_mode == "paper" or (acc is not None and user.has_subscription()))
             if ok:
                 should_run[user.id] = (bs, acc)
         for uid in list(self.workers):
@@ -191,6 +192,22 @@ class EngineManager:
         if uid in self.workers:
             await self.stop_worker(uid)
         await self.sync_workers()
+
+    def force_ai(self) -> None:
+        """Анализ всех монет на следующем цикле (кнопка в админ-панели)."""
+        self._ai_ts.clear()
+
+    def engine_state(self) -> dict:
+        return {
+            "workers": len(self.workers),
+            "symbols": [{"symbol": s, "price": f.price, "has_klines": bool(f.klines),
+                         "regime": self.brain.insights[s].regime if s in self.brain.insights else None,
+                         "source": self.brain.insights[s].source if s in self.brain.insights else None,
+                         "ai_age_min": round((time.time() - self._ai_ts[s]) / 60) if s in self._ai_ts else None}
+                        for s, f in self.hub.feeds.items()],
+            "ai_enabled": self.ai.enabled,
+            "lessons": len(self.lessons),
+        }
 
     def status(self, uid: int) -> Optional[str]:
         w = self.workers.get(uid)

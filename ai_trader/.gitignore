@@ -1,4 +1,7 @@
 .env
+SETUP_CODE.txt
+venv/
+logs/
 data.db
 __pycache__/
 *.pyc

@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from .config import settings
-from .db import AIInsight, BotSettings, ExchangeAccount, Lesson, Session, User
+from .db import AIInsight, BotSettings, ExchangeAccount, Lesson, Session, User, utcnow
 from .engine.risk import PROFILES
 from .exchange.bybit import KeyCheckError, verify_keys
 from .security import encrypt, validate_init_data
@@ -24,19 +24,29 @@ async def current_user(x_init_data: str = Header(default="")) -> User:
         tg = {"id": settings.dev_user_id, "first_name": "Dev"}
     if tg is None:
         raise HTTPException(401, "Откройте приложение из Telegram")
-    return await ensure_user(int(tg["id"]), tg.get("username"), tg.get("first_name"))
+    user = await ensure_user(int(tg["id"]), tg.get("username"), tg.get("first_name"))
+    if user.blocked:
+        raise HTTPException(403, "Доступ заблокирован. Обратитесь в поддержку.")
+    return user
 
 
 async def ensure_user(uid: int, username: Optional[str], first_name: Optional[str]) -> User:
     async with Session() as s:
         user = await s.get(User, uid)
         if user is None:
-            user = User(id=uid, username=username, first_name=first_name)
+            user = User(id=uid, username=username, first_name=first_name, last_seen=utcnow())
             s.add(user)
+            await s.flush()          # MySQL: сначала клиент, потом зависимые записи (внешний ключ)
             s.add(BotSettings(user_id=uid, symbols=list(settings.default_symbols),
                               paper_balance=settings.paper_start_balance,
                               strategies={"grid": True, "trend": True, "liquidation": True}))
-            await s.commit()
+        else:
+            user.last_seen = utcnow()
+            if username:
+                user.username = username
+            if first_name:
+                user.first_name = first_name
+        await s.commit()
         return user
 
 
@@ -67,6 +77,8 @@ async def me(request: Request, user: User = Depends(current_user)):
                           "daily_loss_pct": p.daily_loss_pct, "grid_levels": p.grid_levels} for p in PROFILES.values()],
             "plans": [{"code": p.code, "title": p.title, "days": p.days, "stars": p.stars} for p in settings.plans],
             "referral_link": settings.referral_link,
+            "support": settings.support_contact,
+            "maintenance": settings.maintenance,
         },
     }
 
@@ -150,6 +162,8 @@ async def update_settings(body: SettingsIn, request: Request, user: User = Depen
 async def bot_action(action: Literal["start", "stop"], request: Request, user: User = Depends(current_user)):
     async with Session() as s:
         bs = await s.get(BotSettings, user.id)
+        if action == "start" and settings.maintenance:
+            raise HTTPException(423, "Идёт техобслуживание — запуск временно недоступен")
         if action == "start" and bs.trading_mode == "exchange" and not user.has_subscription():
             raise HTTPException(402, "Подписка закончилась — продлите её, чтобы торговать на бирже")
         bs.running = action == "start"

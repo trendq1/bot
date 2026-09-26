@@ -101,22 +101,68 @@ class MarketHub:
                 feed.liqs.append((now, side, float(d["v"]) * float(d["p"])))
 
     def start_streams(self) -> None:
-        self._ws = WebSocket(testnet=False, channel_type="linear")
+        """Блокирующее подключение pybit — вызывать через asyncio.to_thread."""
+        ws = WebSocket(testnet=False, channel_type="linear", retries=3)
         for i in range(0, len(self.symbols), 10):
             chunk = self.symbols[i:i + 10]
-            self._ws.ticker_stream(chunk, self._on_ticker)
-            self._ws.all_liquidation_stream(chunk, self._on_liq)
+            ws.ticker_stream(chunk, self._on_ticker)
+            ws.all_liquidation_stream(chunk, self._on_liq)
+        self._ws = ws
+
+    def ws_connected(self) -> bool:
+        try:
+            return self._ws is not None and self._ws.is_connected()
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _ensure_streams(self) -> None:
+        if self.ws_connected():
+            return
+        try:
+            if self._ws is not None:
+                await asyncio.to_thread(self._ws.exit)
+        except Exception:  # noqa: BLE001
+            pass
+        self._ws = None
+        try:
+            await asyncio.to_thread(self.start_streams)
+            log.info("WebSocket Bybit подключён")
+        except Exception as e:  # noqa: BLE001
+            log.warning("WebSocket Bybit недоступен (%s) — цены берём через REST, повтор через минуту", e)
+
+    async def _poll_prices(self) -> None:
+        """Запасной канал цен, пока WebSocket не работает."""
+        try:
+            r = await asyncio.to_thread(self.http.get_tickers, category="linear")
+        except Exception as e:  # noqa: BLE001
+            log.debug("tickers: %s", e)
+            return
+        now = time.time()
+        for t in r["result"]["list"]:
+            feed = self.feeds.get(t["symbol"])
+            if feed is not None and t.get("lastPrice"):
+                feed.price = float(t["lastPrice"])
+                feed.prices.append((now, feed.price))
+                if t.get("fundingRate"):
+                    feed.funding = float(t["fundingRate"])
 
     async def run(self) -> None:
-        """Держит свечи свежими (раз в минуту на символ)."""
-        await self.load_instruments()
-        self.start_streams()
+        """Инструменты, свечи раз в минуту, контроль WebSocket с переподключением."""
+        ws_check = 0.0
         while True:
+            if len(self.instruments) < len(self.symbols):
+                await self.load_instruments()
+            if time.time() - ws_check > 60:
+                ws_check = time.time()
+                await self._ensure_streams()
+            if not self.ws_connected():
+                await self._poll_prices()
             for s in self.symbols:
                 if time.time() - self.feeds[s].klines_ts > 60:
                     try:
                         await self.refresh_klines(s)
                     except Exception as e:  # noqa: BLE001
+                        self.feeds[s].klines_ts = time.time() - 30     # не долбим API при сбое
                         log.warning("%s: свечи не загрузились: %s", s, e)
             await asyncio.sleep(5)
 

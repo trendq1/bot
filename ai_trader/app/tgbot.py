@@ -52,6 +52,7 @@ async def paid(m: Message) -> None:
     plan = settings.plan(plan_code)
     async with Session() as s:
         s.add(Payment(user_id=int(uid), plan=plan.code, stars=sp.total_amount,
+                      usd=round(sp.total_amount * settings.stars_usd_rate, 2),
                       charge_id=sp.telegram_payment_charge_id))
         user = await s.get(User, int(uid))
         base = user.sub_until if user.sub_until and user.sub_until > utcnow() else utcnow()
@@ -64,8 +65,8 @@ async def paid(m: Message) -> None:
                    "Подключите Bybit в приложении и включите торговлю на бирже.", reply_markup=app_keyboard())
 
 
-def build() -> tuple:
-    bot = Bot(settings.bot_token)
+def build(token: str) -> tuple:
+    bot = Bot(token)
     dp = Dispatcher()
     dp.include_router(router)
     return bot, dp

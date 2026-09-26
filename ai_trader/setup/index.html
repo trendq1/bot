@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Установка AI Trader</title>
+<link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body class="setup">
+<div class="setup-box">
+  <h1>⚙️ Установка AI Trader</h1>
+  <p class="muted">Заполните данные один раз. После сохранения приложение перезапустится и откроет админ-панель.</p>
+
+  <div class="card">
+    <h3>1. Код установки</h3>
+    <p class="muted small">Откройте в файловом менеджере файл <b>SETUP_CODE.txt</b> в папке проекта и вставьте код.</p>
+    <input class="inp" id="code" placeholder="Например A1B2C3D4" autocomplete="off">
+  </div>
+
+  <div class="card">
+    <h3>2. База данных MySQL</h3>
+    <p class="muted small">Создайте базу и пользователя в панели хостинга (раздел «Базы данных» / phpMyAdmin), кодировка utf8mb4.</p>
+    <div class="grid2">
+      <label>Хост<input class="inp" id="dbHost" value="localhost"></label>
+      <label>Порт<input class="inp" id="dbPort" value="3306" inputmode="numeric"></label>
+      <label>Имя базы<input class="inp" id="dbName" placeholder="aitrader"></label>
+      <label>Пользователь<input class="inp" id="dbUser" placeholder="aitrader"></label>
+    </div>
+    <label>Пароль базы<input class="inp" id="dbPass" type="password"></label>
+    <button class="btn ghost" id="testDb">Проверить подключение</button>
+    <div class="note" id="dbResult"></div>
+  </div>
+
+  <div class="card">
+    <h3>3. Администратор панели</h3>
+    <div class="grid2">
+      <label>Логин<input class="inp" id="adUser" value="admin"></label>
+      <label>Пароль (от 8 символов)<input class="inp" id="adPass" type="password"></label>
+    </div>
+    <label>Повторите пароль<input class="inp" id="adPass2" type="password"></label>
+  </div>
+
+  <div class="card">
+    <h3>4. Сервисы <span class="muted small">(можно заполнить позже в админ-панели)</span></h3>
+    <label>Токен Telegram-бота (@BotFather)<input class="inp" id="botToken" placeholder="123456:ABC..."></label>
+    <label>Адрес мини-аппа (HTTPS)<input class="inp" id="webappUrl"></label>
+    <label>Ключ Anthropic (Claude)<input class="inp" id="aiKey" type="password" placeholder="sk-ant-..."></label>
+  </div>
+
+  <button class="btn primary big" id="finish">Установить</button>
+  <div class="note" id="finishResult"></div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+$("webappUrl").value = location.origin.replace(/^http:/, "https:") + "/app/";
+const db = () => ({ host: $("dbHost").value.trim(), port: Number($("dbPort").value || 3306), user: $("dbUser").value.trim(),
+                    password: $("dbPass").value, name: $("dbName").value.trim() });
+async function post(url, body) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(typeof d.detail === "string" ? d.detail : (d.detail || []).map((x) => x.msg).join("; ") || "Ошибка " + r.status);
+  return d;
+}
+function show(id, text, ok) { const el = $(id); el.textContent = text; el.className = "note " + (ok ? "ok" : "err"); }
+$("testDb").onclick = async () => {
+  try { const r = await post("/setup/api/test-db", { code: $("code").value, db: db() }); show("dbResult", "✅ Подключено: " + r.version, true); }
+  catch (e) { show("dbResult", "❌ " + e.message, false); }
+};
+$("finish").onclick = async () => {
+  if ($("adPass").value !== $("adPass2").value) return show("finishResult", "❌ Пароли не совпадают", false);
+  const btn = $("finish"); btn.disabled = true; btn.textContent = "Устанавливаем…";
+  try {
+    await post("/setup/api/finish", { code: $("code").value, db: db(), admin_username: $("adUser").value.trim(),
+      admin_password: $("adPass").value, bot_token: $("botToken").value.trim(), webapp_url: $("webappUrl").value.trim(),
+      anthropic_api_key: $("aiKey").value.trim() });
+    show("finishResult", "✅ Готово! Перезапускаем приложение…", true);
+    const wait = async () => {
+      try { const h = await (await fetch("/health")).json(); if (h.configured) return (location.href = "/admin"); } catch (e) {}
+      setTimeout(wait, 1500);
+    };
+    setTimeout(wait, 2500);
+  } catch (e) { show("finishResult", "❌ " + e.message, false); btn.disabled = false; btn.textContent = "Установить"; }
+};
+</script>
+</body>
+</html>

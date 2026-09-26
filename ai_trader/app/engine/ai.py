@@ -140,13 +140,54 @@ REVIEW_SCHEMA = {
 }
 
 
+# $ за 1 млн токенов (вход, выход) — для учёта расходов в админ-панели
+PRICES = {
+    "claude-fable-5-1": (10.0, 50.0), "claude-fable-5": (10.0, 50.0),
+    "claude-opus-5-5": (4.0, 20.0), "claude-opus-5": (5.0, 25.0),
+    "claude-sonnet-5": (2.0, 10.0), "claude-haiku-4-5": (1.0, 5.0),
+}
+
+
+def usage_cost(model: str, usage) -> float:
+    inp, out = PRICES.get(model, PRICES["claude-opus-5"])
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    return (usage.input_tokens * inp + cache_read * inp * 0.1 + cache_write * inp * 1.25
+            + usage.output_tokens * out) / 1_000_000
+
+
 class AIAnalyst:
     def __init__(self):
-        self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key) if settings.anthropic_api_key else None
+        self._client = None
+        self._client_key = None
+
+    @property
+    def client(self):
+        """Клиент пересоздаётся, если ключ поменяли в админ-панели."""
+        key = settings.anthropic_api_key
+        if not key:
+            return None
+        if key != self._client_key:
+            self._client, self._client_key = anthropic.AsyncAnthropic(api_key=key), key
+        return self._client
 
     @property
     def enabled(self) -> bool:
         return self.client is not None
+
+    async def _log_usage(self, kind: str, resp) -> None:
+        from ..db import AIUsage, Session
+        u = resp.usage
+        try:
+            async with Session() as s:
+                s.add(AIUsage(model=resp.model or settings.ai_model, kind=kind, input_tokens=u.input_tokens,
+                              output_tokens=u.output_tokens,
+                              cache_read_tokens=getattr(u, "cache_read_input_tokens", 0) or 0,
+                              cache_write_tokens=getattr(u, "cache_creation_input_tokens", 0) or 0,
+                              cost_usd=usage_cost(resp.model or settings.ai_model, u)))
+                await s.commit()
+        except Exception as e:  # noqa: BLE001 — учёт расходов не должен ломать анализ
+            log.warning("Не удалось записать расход ИИ: %s", e)
 
     def _request_kwargs(self) -> dict:
         model = settings.ai_model
@@ -159,7 +200,8 @@ class AIAnalyst:
             kw["fallbacks"] = "default"
         return kw
 
-    async def _json_call(self, system: str, schema: dict, payload: dict, max_tokens: int) -> Optional[dict]:
+    async def _json_call(self, system: str, schema: dict, payload: dict, max_tokens: int,
+                         kind: str = "analyze") -> Optional[dict]:
         kw = self._request_kwargs()
         kw.setdefault("output_config", {})["format"] = {"type": "json_schema", "schema": schema}
         try:
@@ -178,6 +220,7 @@ class AIAnalyst:
         except anthropic.APIConnectionError:
             log.warning("Claude: нет соединения")
             return None
+        await self._log_usage(kind, resp)
         if resp.stop_reason in ("refusal", "max_tokens"):
             log.warning("Claude: ответ не получен (%s)", resp.stop_reason)
             return None
@@ -222,7 +265,8 @@ class AIAnalyst:
         if not self.enabled:
             return None
         return await self._json_call(REVIEW_SYSTEM, REVIEW_SCHEMA,
-                                     {"stats": summary, "current_lessons": lessons[-10:]}, max_tokens=16000)
+                                     {"stats": summary, "current_lessons": lessons[-10:]}, max_tokens=16000,
+                                     kind="review")
 
 
 def apply_tuning(current: dict, param: str, value: float) -> dict:

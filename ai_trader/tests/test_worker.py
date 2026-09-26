@@ -33,6 +33,7 @@ def test_worker_runs_grid_and_records_trades():
         await init_db()
         async with Session() as s:
             s.add(User(id=555, first_name="T"))
+            await s.flush()
             s.add(BotSettings(user_id=555, symbols=["SOLUSDT"], paper_balance=10_000))
             await s.commit()
         mgr = EngineManager()

@@ -54,3 +54,39 @@ def validate_init_data(init_data: str, bot_token: str, max_age_sec: int = 86400)
 
 if __name__ == "__main__":
     print(Fernet.generate_key().decode())
+
+
+# ───────────── админ-панель: пароли и сессии ─────────────
+
+def hash_password(password: str) -> str:
+    import os as _os
+    salt = _os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 310_000)
+    return f"pbkdf2_sha256$310000${salt.hex()}${dk.hex()}"
+
+
+def check_password(password: str, stored: str) -> bool:
+    try:
+        algo, rounds, salt, digest = stored.split("$")
+    except ValueError:
+        return False
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), int(rounds))
+    return hmac.compare_digest(dk.hex(), digest)
+
+
+def make_session_token(admin_id: int, ttl_sec: int = 12 * 3600) -> str:
+    exp = int(time.time()) + ttl_sec
+    body = f"{admin_id}.{exp}"
+    sig = hmac.new(settings.secret_key.encode(), body.encode(), hashlib.sha256).hexdigest()
+    return f"{body}.{sig}"
+
+
+def read_session_token(token: str) -> Optional[int]:
+    try:
+        admin_id, exp, sig = token.split(".")
+    except (ValueError, AttributeError):
+        return None
+    expected = hmac.new(settings.secret_key.encode(), f"{admin_id}.{exp}".encode(), hashlib.sha256).hexdigest()
+    if not settings.secret_key or not hmac.compare_digest(sig, expected) or int(exp) < time.time():
+        return None
+    return int(admin_id)

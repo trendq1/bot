@@ -45,10 +45,9 @@ def test_full_user_flow():
 
 
 def test_requires_valid_telegram_signature(monkeypatch):
-    from dataclasses import replace
-
-    from app import api
-    monkeypatch.setattr(api, "settings", replace(api.settings, dev_user_id=0, bot_token="123:ABC"))
+    from app.config import settings
+    monkeypatch.setattr(settings, "dev_user_id", 0)
+    monkeypatch.setattr(settings, "bot_token", "123:ABC")
     with TestClient(app) as c:
         assert c.get("/api/me").status_code == 401
         assert c.get("/api/me", headers={"X-Init-Data": "user=%7B%22id%22%3A1%7D&hash=bad"}).status_code == 401
