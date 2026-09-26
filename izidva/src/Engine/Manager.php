@@ -42,10 +42,18 @@ final class Manager
     {
         $this->brain->learner->load();
         $this->loadTuning();
-        if (function_exists('pcntl_async_signals')) {
-            pcntl_async_signals(true);
-            pcntl_signal(SIGTERM, fn() => $this->stop = true);
-            pcntl_signal(SIGINT, fn() => $this->stop = true);
+        // На части хостингов расширение pcntl частично отключено через disable_functions —
+        // проверяем каждую функцию отдельно и оборачиваем в try/catch, чтобы демон не падал.
+        if (function_exists('pcntl_async_signals') && function_exists('pcntl_signal') && defined('SIGTERM')) {
+            try {
+                pcntl_async_signals(true);
+                pcntl_signal(SIGTERM, fn() => $this->stop = true);
+                pcntl_signal(SIGINT, fn() => $this->stop = true);
+            } catch (\Throwable $e) {
+                Log::warn('pcntl недоступен, мягкая остановка по сигналу отключена: ' . $e->getMessage());
+            }
+        } else {
+            Log::warn('pcntl недоступен (отключён на хостинге) — мягкая остановка по SIGTERM работать не будет, только systemd kill.');
         }
         DB::q('INSERT INTO engine_status (id, heartbeat_at, started_at, pid) VALUES (1, ?, ?, ?)
                ON DUPLICATE KEY UPDATE heartbeat_at = VALUES(heartbeat_at), started_at = VALUES(started_at), pid = VALUES(pid)',
