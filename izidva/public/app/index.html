@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
   <title>AI Trader</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
@@ -75,6 +76,13 @@
 
       <!-- СДЕЛКИ -->
       <section class="screen" id="s-trades">
+        <div class="card">
+          <div class="card-h"><h3 data-i18n="live_chart">Графік онлайн</h3><span class="pill on small-pill" id="chartLive"><span class="dot"></span><span data-i18n="live">наживо</span></span></div>
+          <select id="chartSymbol" class="inp" style="margin-bottom:10px"></select>
+          <div class="chart" id="tradeChart" style="height:280px"></div>
+          <div class="legend chart-legend"><span class="sw entry-buy"></span><span data-i18n="entry_long">вхід лонг</span><span class="sw entry-sell"></span><span data-i18n="entry_short">вхід шорт</span><span class="sw exit-mark"></span><span data-i18n="exit_mark">вихід</span></div>
+          <div class="muted small" id="chartLiveInfo"></div>
+        </div>
         <div class="card"><div class="card-h"><h3 data-i18n="recent_trades">Останні угоди</h3></div><div id="tradeList" class="list"></div></div>
       </section>
 

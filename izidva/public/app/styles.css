@@ -131,6 +131,13 @@ a { color: var(--accent); }
 .plan span { color: var(--warn); font-weight: 600; font-size: 14px; }
 .disclaimer { color: var(--muted); font-size: 11px; text-align: center; margin: 8px 12px 20px; }
 
+.small-pill { padding: 3px 9px; font-size: 11px; }
+.chart-legend { margin-top: 10px; }
+.chart-legend .sw { border-radius: 50%; }
+.sw.entry-buy { background: var(--win); }
+.sw.entry-sell { background: var(--loss); }
+.sw.exit-mark { background: var(--text-2); }
+
 .tabs { position: fixed; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(5, 1fr); background: rgba(13,15,19,.92); backdrop-filter: blur(12px); border-top: 1px solid var(--border); padding: 6px 4px calc(6px + env(safe-area-inset-bottom)); z-index: 10; }
 .tabs button { background: none; border: 0; color: var(--muted); font: 500 11px Inter, sans-serif; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px 0; cursor: pointer; }
 .tabs button .ico { font-size: 19px; filter: grayscale(1) opacity(.7); }

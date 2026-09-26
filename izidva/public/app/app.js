@@ -225,6 +225,74 @@ async function loadTrades() {
     const rows = await api("/trades?tz=" + TZ);
     $("tradeList").innerHTML = rows.map(tradeRow).join("") || `<div class="empty">${t("no_trades_yet")}</div>`;
   } catch (e) { toast(e.message); }
+  initChartTab();
+}
+
+// ───────────── живой график ─────────────
+const chartState = { chart: null, series: null, lines: [], symbol: null, timer: null };
+
+function ensureChart() {
+  if (chartState.chart || !window.LightweightCharts) return chartState.chart;
+  const box = $("tradeChart");
+  chartState.chart = LightweightCharts.createChart(box, {
+    width: box.clientWidth, height: 280, layout: { background: { color: "transparent" }, textColor: "#b4b8c2", fontFamily: "Inter, sans-serif" },
+    grid: { vertLines: { color: "#1c1f26" }, horzLines: { color: "#1c1f26" } },
+    rightPriceScale: { borderColor: "#262a33" }, timeScale: { borderColor: "#262a33", timeVisible: true },
+    crosshair: { mode: 0 },
+  });
+  chartState.series = chartState.chart.addCandlestickSeries({ upColor: "#26a69a", downColor: "#ef5350", borderVisible: false, wickUpColor: "#26a69a", wickDownColor: "#ef5350" });
+  window.addEventListener("resize", () => { if (chartState.chart) chartState.chart.applyOptions({ width: box.clientWidth }); });
+  return chartState.chart;
+}
+
+function initChartTab() {
+  const me = state.me; if (!me) return;
+  const symbols = (me.settings && me.settings.symbols && me.settings.symbols.length) ? me.settings.symbols : me.options.symbols;
+  const sel = $("chartSymbol");
+  if (sel.dataset.filled !== symbols.join(",")) {
+    sel.innerHTML = symbols.map((s) => `<option value="${s}">${s.replace("USDT", "")}</option>`).join("");
+    sel.dataset.filled = symbols.join(",");
+    sel.onchange = () => loadChart(sel.value);
+  }
+  if (!chartState.symbol) chartState.symbol = symbols[0];
+  sel.value = chartState.symbol;
+  loadChart(chartState.symbol);
+  if (!chartState.timer) {
+    chartState.timer = setInterval(() => { if ($("s-trades").classList.contains("active")) loadChart(chartState.symbol, true); }, 4000);
+  }
+}
+
+async function loadChart(symbol, silent = false) {
+  chartState.symbol = symbol;
+  const chart = ensureChart();
+  if (!chart) { $("chartLiveInfo").textContent = ""; return; }
+  if (!silent) $("chartLiveInfo").textContent = t("chart_loading");
+  try {
+    const r = await api(`/chart?symbol=${symbol}`);
+    if (chartState.symbol !== symbol) return;                // символ уже сменили, пока грузилось
+    chartState.series.setData(r.candles);
+    chartState.series.setMarkers(r.markers.map((m) => m.kind === "entry"
+      ? { time: m.time, position: m.side === "Buy" ? "belowBar" : "aboveBar", color: m.side === "Buy" ? "#26a69a" : "#ef5350", shape: m.side === "Buy" ? "arrowUp" : "arrowDown", text: "" }
+      : { time: m.time, position: m.side === "Buy" ? "aboveBar" : "belowBar", color: "#b4b8c2", shape: "circle", text: money(m.pnl, true) }));
+    chartState.lines.forEach((l) => { try { chartState.series.removePriceLine(l); } catch (e) {} });
+    chartState.lines = [];
+    const info = [];
+    (r.live || []).forEach((l) => {
+      if (l.kind === "position") {
+        chartState.lines.push(chartState.series.createPriceLine({ price: l.entry, color: l.side === "Buy" ? "#26a69a" : "#ef5350", lineWidth: 1, lineStyle: 2, title: l.side === "Buy" ? "▲" : "▼" }));
+        chartState.lines.push(chartState.series.createPriceLine({ price: l.stop, color: "#fab219", lineWidth: 1, lineStyle: 2, title: "stop" }));
+        info.push(t("current_position", { side: l.side === "Buy" ? t("long") : t("short"), entry: l.entry, stop: l.stop }));
+      } else if (l.kind === "grid") {
+        info.push(t("grid_active", { mode: l.mode === "long" ? t("long") : t("short"), step: l.step_pct }));
+      }
+    });
+    $("chartLiveInfo").textContent = info.join(" · ");
+    $("chartLive").classList.toggle("on", r.candles.length > 0);
+  } catch (e) {
+    if (chartState.symbol !== symbol) return;
+    if (!silent) $("chartLiveInfo").textContent = t("chart_error", { msg: e.message });
+    $("chartLive").classList.remove("on");
+  }
 }
 
 // ───────────── ИИ ─────────────

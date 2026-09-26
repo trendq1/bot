@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Web;
 
+use App\Bybit;
 use App\Crypto;
 use App\DB;
 use App\Engine\BybitExchange;
@@ -33,6 +34,7 @@ final class MiniApi
             ['GET', '/day'] => self::day($uid, $tz),
             ['GET', '/trades'] => Stats::recent($uid, $tz),
             ['GET', '/market'] => self::market(),
+            ['GET', '/chart'] => self::chart($uid),
             ['POST', '/pay'] => self::pay($uid, $b),
             default => Api::fail(404, 'Не найдено'),
         };
@@ -252,6 +254,52 @@ final class MiniApi
         return ['market' => self::marketView(),
             'lessons' => array_column(DB::all('SELECT text FROM lessons ORDER BY id DESC LIMIT 5'), 'text'),
             'ai_enabled' => Settings::get('anthropic_api_key') !== ''];
+    }
+
+    // ───────────── живой график ─────────────
+
+    /** Свечи Bybit (публичный эндпоинт, без ключей) + отметки сделок клиента + текущие позиции/сетки. */
+    private static function chart(int $uid): array
+    {
+        $symbol = strtoupper(trim((string)($_GET['symbol'] ?? '')));
+        if (!in_array($symbol, Settings::get('symbols'), true)) {
+            Api::fail(400, 'Неизвестная монета');
+        }
+        $interval = in_array((string)($_GET['interval'] ?? '5'), ['1', '3', '5', '15', '60'], true) ? (string)$_GET['interval'] : '5';
+        $limit = max(50, min(300, (int)($_GET['limit'] ?? 200)));
+        try {
+            $r = (new Bybit())->get('/v5/market/kline', ['category' => 'linear', 'symbol' => $symbol, 'interval' => $interval, 'limit' => $limit]);
+        } catch (\Throwable $e) {
+            Api::fail(502, 'Bybit: ' . $e->getMessage());
+        }
+        $candles = [];
+        foreach (array_reverse($r['list'] ?? []) as $k) {
+            $candles[] = ['time' => intdiv((int)$k[0], 1000), 'open' => (float)$k[1], 'high' => (float)$k[2], 'low' => (float)$k[3], 'close' => (float)$k[4]];
+        }
+        $markers = [];
+        if ($candles) {
+            $from = gmdate('Y-m-d H:i:s', $candles[0]['time']);
+            foreach (DB::all('SELECT side, entry, `exit`, pnl, opened_at, closed_at FROM trades
+                    WHERE user_id = ? AND symbol = ? AND closed_at >= ? ORDER BY closed_at', [$uid, $symbol, $from]) as $tr) {
+                $markers[] = ['kind' => 'entry', 'time' => strtotime($tr['opened_at'] . ' UTC'), 'price' => round((float)$tr['entry'], 8), 'side' => $tr['side']];
+                $markers[] = ['kind' => 'exit', 'time' => strtotime($tr['closed_at'] . ' UTC'), 'price' => round((float)$tr['exit'], 8),
+                    'side' => $tr['side'], 'pnl' => round((float)$tr['pnl'], 2)];
+            }
+        }
+        $ws = DB::row('SELECT live, updated_at FROM worker_state WHERE user_id = ?', [$uid]);
+        $live = $ws && strtotime($ws['updated_at'] . ' UTC') > time() - 120 ? (json_decode((string)$ws['live'], true) ?: []) : [];
+        $lines = [];
+        foreach ($live['grids'] ?? [] as $g) {
+            if ($g['symbol'] === $symbol) {
+                $lines[] = ['kind' => 'grid', 'mode' => $g['mode'], 'step_pct' => $g['step_pct']];
+            }
+        }
+        foreach ($live['directional'] ?? [] as $d) {
+            if ($d['symbol'] === $symbol) {
+                $lines[] = ['kind' => 'position', 'side' => $d['side'], 'entry' => (float)$d['entry'], 'stop' => (float)$d['stop']];
+            }
+        }
+        return ['symbol' => $symbol, 'candles' => $candles, 'markers' => $markers, 'live' => $lines];
     }
 
     // ───────────── оплата ─────────────
