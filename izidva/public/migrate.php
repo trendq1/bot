@@ -261,7 +261,10 @@ if ($("install")) $("install").onclick = async () => {
         throw e;
       }
     }
-    show("result", r.telegram ? "✅ " + r.telegram : "", !!r.telegram && !r.telegram.startsWith("Telegram:"));
+    if (r.telegram) {
+      const ok = !r.telegram.startsWith("Telegram:");
+      show("result", (ok ? "✅ " : "⚠️ ") + r.telegram, ok);
+    }
     $("cmd").textContent = r.service_command;
     document.querySelectorAll(".card:not(#done)").forEach((c) => (c.hidden = true));
     btn.hidden = true; $("done").hidden = false;

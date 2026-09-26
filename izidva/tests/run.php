@@ -256,6 +256,14 @@ test('настройки: секреты шифруются', function () {
     check(!str_contains((string)DB::val("SELECT value FROM app_settings WHERE `key` = 'anthropic_api_key'"), 'sk-ant'), 'в БД только шифр');
     Settings::save(['anthropic_api_key' => '', 'symbols' => ['SOLUSDT'], 'ai_interval_min' => 30, 'require_referral' => true]);
 });
+test('настройки: битое шифрование одного поля не роняет остальные', function () {
+    Settings::save(['bot_token' => '123:ABC']);
+    DB::q("UPDATE app_settings SET value = 'мусор-после-смены-APP_KEY' WHERE `key` = 'bot_token'");
+    $s = Settings::all(true);
+    check($s['bot_token'] === '', 'битое поле читается как «не задано», а не бросает исключение');
+    check($s['ai_interval_min'] === 30, 'остальные настройки при этом читаются нормально');
+    Settings::save(['bot_token' => '']);
+});
 
 echo "ИИ через официальный SDK (заглушка API)\n";
 test('запрос к Claude и разбор ответа', function () {

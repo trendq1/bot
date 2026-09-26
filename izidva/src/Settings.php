@@ -66,7 +66,18 @@ final class Settings
                 continue;
             }
             if (self::FIELDS[$k][4]) {
-                $out[$k] = $row['value'] === '' ? '' : Crypto::decrypt($row['value']);
+                if ($row['value'] === '') {
+                    $out[$k] = '';
+                    continue;
+                }
+                // Битое значение (например, после смены APP_KEY) не должно ронять весь /overview или демон —
+                // считаем поле «не задано» и один раз пишем в лог, вместо необработанного исключения на каждый запрос.
+                try {
+                    $out[$k] = Crypto::decrypt($row['value']);
+                } catch (\Throwable $e) {
+                    $out[$k] = '';
+                    Log::warn("Settings: не удалось расшифровать «{$k}» — APP_KEY изменился? Поле сброшено, впишите заново. " . $e->getMessage());
+                }
             } else {
                 $out[$k] = self::coerce($k, json_decode($row['value'], true));
             }
