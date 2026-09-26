@@ -10,6 +10,7 @@ TMP="$(mktemp -d)"
 mkdir -p "$TMP/izidva"
 tar --exclude=./storage/.env --exclude='./storage/logs/*.log' --exclude=./storage/setup_code.php \
     --exclude=./storage/login_attempts.json --exclude=./storage/setup_attempts --exclude=./storage/daemon.lock \
+    --exclude='./storage/tmp_broadcast_*' \
     --exclude=./tests --exclude='.git' --exclude='./*.zip' --exclude='./vendor/*/*/tests' --exclude='./vendor/*/*/docs' \
     --exclude='./vendor/*/*/examples' -cf - . | tar -xf - -C "$TMP/izidva"
 (cd "$TMP" && zip -q -r -9 izidva.zip izidva)

@@ -319,16 +319,88 @@ VIEWS.ai = async () => {
 };
 
 // ───────────── рассылка ─────────────
+function wrapSelection(ta, open, close) {
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  const before = ta.value.slice(0, s), sel = ta.value.slice(s, e) || "текст", after = ta.value.slice(e);
+  ta.value = before + open + sel + close + after;
+  ta.focus();
+  ta.selectionStart = s + open.length;
+  ta.selectionEnd = s + open.length + sel.length;
+}
+let broadcastImage = null;
 VIEWS.broadcast = async () => {
+  broadcastImage = null;
   $("view").innerHTML = `<div class="card" style="max-width:640px"><h3>Сообщение клиентам в Telegram</h3>
     <label>Кому<select id="bAud"><option value="all">Всем клиентам</option><option value="subscribers">С активной подпиской</option><option value="no_subscription">Без подписки</option><option value="running">У кого работает бот</option></select></label>
-    <label>Текст<textarea id="bText" rows="6" placeholder="Например: 🔥 Скидка 20% на подписку до конца недели"></textarea></label>
+    <label>Картинка (необязательно)<input class="inp" id="bImg" type="file" accept="image/png,image/jpeg,image/webp,image/gif"></label>
+    <div id="bImgWrap" hidden style="margin-top:8px"><img id="bImgPreview" style="max-width:100%;max-height:220px;border-radius:10px;display:block"><button class="btn ghost small-btn" id="bImgClear" style="margin-top:6px">✕ Убрать картинку</button></div>
+    <label>Текст<span class="muted small"> — выделите слово и нажмите кнопку форматирования</span></label>
+    <div class="row" style="margin:4px 0 6px">
+      <button class="btn" type="button" data-tag="b" title="Жирный"><b>Ж</b></button>
+      <button class="btn" type="button" data-tag="i" title="Курсив"><i>К</i></button>
+      <button class="btn" type="button" data-tag="u" title="Подчёркнутый"><u>Ч</u></button>
+      <button class="btn" type="button" data-tag="s" title="Зачёркнутый"><s>С</s></button>
+      <button class="btn" type="button" data-tag="code" title="Моноширинный">&lt;/&gt;</button>
+      <button class="btn" type="button" data-tag="tg-spoiler" title="Спойлер">🙈</button>
+      <button class="btn" type="button" id="bLink" title="Ссылка в тексте">🔗</button>
+    </div>
+    <textarea id="bText" rows="6" placeholder="Например: 🔥 Скидка 20% на подписку до конца недели"></textarea>
+    <label>Кнопка под сообщением (необязательно)</label>
+    <div class="grid2"><input class="inp" id="bBtnText" placeholder="Текст кнопки, например «Открыть»"><input class="inp" id="bBtnUrl" placeholder="https://..."></div>
     <button class="btn primary" id="bSend" style="margin-top:10px">Отправить</button><div class="note" id="bRes"></div></div>`;
+  $("view").querySelectorAll("[data-tag]").forEach((b) => (b.onclick = () => wrapSelection($("bText"), `<${b.dataset.tag}>`, `</${b.dataset.tag}>`)));
+  $("bLink").onclick = () => {
+    const url = prompt("Ссылка (https://...)"); if (!url) return;
+    wrapSelection($("bText"), `<a href="${url}">`, `</a>`);
+  };
+  $("bImg").onchange = () => {
+    const f = $("bImg").files[0]; if (!f) return;
+    if (f.size > 8 * 1024 * 1024) { toast("Картинка слишком большая (макс. 8 МБ)"); $("bImg").value = ""; return; }
+    const r = new FileReader();
+    r.onload = () => { broadcastImage = r.result; $("bImgPreview").src = r.result; $("bImgWrap").hidden = false; };
+    r.readAsDataURL(f);
+  };
+  $("bImgClear").onclick = () => { broadcastImage = null; $("bImg").value = ""; $("bImgWrap").hidden = true; };
   $("bSend").onclick = async () => {
     if (!confirm("Отправить сообщение?")) return;
-    try { const r = await post("/broadcast", { text: $("bText").value, audience: $("bAud").value }); $("bRes").className = "note ok"; $("bRes").textContent = `Отправка ${r.recipients} клиентам запущена. Итог появится в журнале.`; }
-    catch (e) { $("bRes").className = "note err"; $("bRes").textContent = e.message; }
+    try {
+      const r = await post("/broadcast", { text: $("bText").value, audience: $("bAud").value, image: broadcastImage,
+        button_text: $("bBtnText").value, button_url: $("bBtnUrl").value });
+      $("bRes").className = "note ok"; $("bRes").textContent = `Отправка ${r.recipients} клиентам запущена. Итог появится в журнале.`;
+    } catch (e) { $("bRes").className = "note err"; $("bRes").textContent = e.message; }
   };
+};
+
+// ───────────── меню бота ─────────────
+VIEWS.menu = async () => {
+  const rows = await api("/menu");
+  $("view").innerHTML = `<div class="card" style="max-width:720px">
+      <h3>Кнопки нижнего меню бота</h3>
+      <p class="muted small">Показываются под сообщением /start и по команде /menu в боте. Открываются как ссылка.</p>
+      ${table(["Название", "Ссылка", "Вкл.", ""], rows.map((m) => `<tr data-id="${m.id}">
+        <td><input class="inp" data-f="title" value="${esc(m.title)}"></td>
+        <td><input class="inp" data-f="url" value="${esc(m.url)}"></td>
+        <td><input type="checkbox" data-f="enabled" ${m.enabled ? "checked" : ""}></td>
+        <td class="row"><button class="btn" data-save="${m.id}">💾</button><button class="btn danger" data-del="${m.id}">✕</button></td></tr>`))}
+      <h3 style="margin-top:14px">Добавить кнопку</h3>
+      <div class="grid2"><input class="inp" id="mTitle" placeholder="Название, например «Наш канал»"><input class="inp" id="mUrl" placeholder="https://t.me/..."></div>
+      <button class="btn primary" id="mAdd" style="margin-top:8px">Добавить</button><div class="note" id="mRes"></div>
+    </div>`;
+  $("mAdd").onclick = async () => {
+    try { await post("/menu", { title: $("mTitle").value, url: $("mUrl").value }); toast("Кнопка добавлена"); go("menu"); }
+    catch (e) { $("mRes").className = "note err"; $("mRes").textContent = e.message; }
+  };
+  $("view").querySelectorAll("[data-save]").forEach((b) => (b.onclick = async () => {
+    const tr = b.closest("tr");
+    const body = {};
+    tr.querySelectorAll("[data-f]").forEach((i) => (body[i.dataset.f] = i.type === "checkbox" ? i.checked : i.value));
+    try { await api("/menu/" + b.dataset.save, { method: "PUT", body: JSON.stringify(body) }); toast("Сохранено"); }
+    catch (e) { toast(e.message); }
+  }));
+  $("view").querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
+    if (!confirm("Удалить кнопку?")) return;
+    try { await api("/menu/" + b.dataset.del, { method: "DELETE" }); go("menu"); } catch (e) { toast(e.message); }
+  }));
 };
 
 // ───────────── настройки ─────────────

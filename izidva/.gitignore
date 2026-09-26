@@ -3,6 +3,7 @@ storage/setup_code.php
 storage/login_attempts.json
 storage/setup_attempts
 storage/daemon.lock
+storage/tmp_broadcast_*
 storage/logs/*
 !storage/logs/.gitkeep
 /vendor/

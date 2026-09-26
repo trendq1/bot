@@ -57,6 +57,14 @@ final class AdminApi
         if (preg_match('#^/admins/(\d+)$#', $path, $mm) && $m === 'DELETE') {
             return self::adminDelete((int)$mm[1], $admin);
         }
+        if (preg_match('#^/menu/(\d+)$#', $path, $mm) && $m === 'PUT') {
+            return self::menuUpdate((int)$mm[1], $b, $a);
+        }
+        if (preg_match('#^/menu/(\d+)$#', $path, $mm) && $m === 'DELETE') {
+            DB::q('DELETE FROM bot_menu_buttons WHERE id = ?', [(int)$mm[1]]);
+            self::audit($a, 'menu.delete', (string)$mm[1]);
+            return ['ok' => true];
+        }
         return match ([$m, $path]) {
             ['GET', '/me'] => ['username' => $a],
             ['GET', '/overview'] => self::overview(max(7, min(365, (int)($_GET['days'] ?? 30)))),
@@ -72,6 +80,8 @@ final class AdminApi
             ['POST', '/ai/run'] => self::aiRun($a),
             ['POST', '/ai/lessons'] => self::lessonAdd($b, $a),
             ['POST', '/broadcast'] => self::broadcast($b, $a),
+            ['GET', '/menu'] => self::menuList(),
+            ['POST', '/menu'] => self::menuAdd($b, $a),
             ['GET', '/logs'] => self::logs(max(10, min(2000, (int)($_GET['lines'] ?? 200)))),
             ['GET', '/admins'] => self::admins(),
             ['POST', '/admins'] => self::adminAdd($b, $a),
@@ -601,13 +611,47 @@ final class AdminApi
 
     // ───────────── рассылка ─────────────
 
+    /** Оставляет только теги, которые понимает Telegram (parse_mode=HTML). */
+    private static function sanitizeTelegramHtml(string $s): string
+    {
+        return strip_tags($s, '<b><strong><i><em><u><ins><s><strike><del><code><pre><a><tg-spoiler>');
+    }
+
+    /** Декодирует data:image/...;base64,... во временный файл. null, если картинки нет. */
+    private static function decodeBroadcastImage(mixed $dataUrl): ?string
+    {
+        if (!is_string($dataUrl) || $dataUrl === '') {
+            return null;
+        }
+        if (!preg_match('/^data:image\/(jpeg|jpg|png|webp|gif);base64,(.+)$/s', $dataUrl, $mm)) {
+            Api::fail(400, 'Неподдерживаемый формат картинки (jpeg, png, webp, gif)');
+        }
+        $bin = base64_decode($mm[2], true);
+        if ($bin === false || strlen($bin) > 10 * 1024 * 1024) {
+            Api::fail(400, 'Картинка повреждена или больше 10 МБ');
+        }
+        $path = STORAGE_DIR . '/tmp_broadcast_' . bin2hex(random_bytes(6)) . '.' . ($mm[1] === 'jpg' ? 'jpeg' : $mm[1]);
+        file_put_contents($path, $bin);
+        return $path;
+    }
+
     private static function broadcast(array $b, string $admin): array
     {
         if (Settings::get('bot_token') === '') {
             Api::fail(400, 'Telegram-бот не настроен — задайте токен в настройках');
         }
-        $text = Api::str($b, 'text', 1, 4000);
+        $text = self::sanitizeTelegramHtml(Api::str($b, 'text', 1, 4000));
         $aud = (string)($b['audience'] ?? 'all');
+        $btnText = trim((string)($b['button_text'] ?? ''));
+        $btnUrl = trim((string)($b['button_url'] ?? ''));
+        $markup = null;
+        if ($btnText !== '' && $btnUrl !== '') {
+            if (!preg_match('#^https?://#i', $btnUrl)) {
+                Api::fail(400, 'Ссылка на кнопке должна начинаться с http(s)://');
+            }
+            $markup = ['inline_keyboard' => [[['text' => mb_substr($btnText, 0, 64), 'url' => $btnUrl]]]];
+        }
+        $imagePath = self::decodeBroadcastImage($b['image'] ?? null);
         $sql = match ($aud) {
             'subscribers' => 'SELECT id FROM users WHERE blocked = 0 AND sub_until > UTC_TIMESTAMP()',
             'no_subscription' => 'SELECT id FROM users WHERE blocked = 0 AND (sub_until IS NULL OR sub_until <= UTC_TIMESTAMP())',
@@ -624,11 +668,60 @@ final class AdminApi
         set_time_limit(0);
         $ok = 0;
         foreach ($ids as $id) {
-            $ok += Telegram::send((int)$id, htmlspecialchars($text)) ? 1 : 0;
+            $ok += ($imagePath ? Telegram::sendPhoto((int)$id, $imagePath, $text, $markup) : Telegram::send((int)$id, $text, $markup)) ? 1 : 0;
             usleep(50_000);                                 // ~20 сообщений в секунду — лимит Telegram
+        }
+        if ($imagePath) {
+            @unlink($imagePath);
         }
         self::audit($admin, 'broadcast.done', "$aud: $ok/" . count($ids));
         exit;
+    }
+
+    // ───────────── меню бота ─────────────
+
+    private static function menuList(): array
+    {
+        return DB::all('SELECT id, title, url, sort_order, enabled FROM bot_menu_buttons ORDER BY sort_order, id');
+    }
+
+    private static function menuAdd(array $b, string $admin): array
+    {
+        $title = Api::str($b, 'title', 1, 64);
+        $url = Api::str($b, 'url', 4, 512);
+        if (!preg_match('#^https?://#i', $url)) {
+            Api::fail(400, 'Ссылка должна начинаться с http(s)://');
+        }
+        $order = (int)DB::val('SELECT COALESCE(MAX(sort_order), 0) + 1 FROM bot_menu_buttons');
+        $id = DB::insert('bot_menu_buttons', ['title' => $title, 'url' => $url, 'sort_order' => $order, 'enabled' => true, 'created_at' => DB::now()]);
+        self::audit($admin, 'menu.add', "$title -> $url");
+        return ['ok' => true, 'id' => $id];
+    }
+
+    private static function menuUpdate(int $id, array $b, string $admin): array
+    {
+        $upd = [];
+        if (isset($b['title'])) {
+            $upd['title'] = Api::str($b, 'title', 1, 64);
+        }
+        if (isset($b['url'])) {
+            $url = Api::str($b, 'url', 4, 512);
+            if (!preg_match('#^https?://#i', $url)) {
+                Api::fail(400, 'Ссылка должна начинаться с http(s)://');
+            }
+            $upd['url'] = $url;
+        }
+        if (isset($b['enabled'])) {
+            $upd['enabled'] = (bool)$b['enabled'];
+        }
+        if (isset($b['sort_order'])) {
+            $upd['sort_order'] = (int)$b['sort_order'];
+        }
+        if ($upd) {
+            DB::update('bot_menu_buttons', $upd, 'id = :id', [':id' => $id]);
+        }
+        self::audit($admin, 'menu.update', (string)$id);
+        return ['ok' => true];
     }
 
     // ───────────── журнал ─────────────

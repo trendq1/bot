@@ -43,7 +43,12 @@ final class Webhook
                 . "ИИ регулярно анализирует рынок и распределяет капитал, а бот учится на результатах сделок.\n\n"
                 . "• Бесплатно: демо-торговля на виртуальном счёте\n• По подписке: торговля на твоём аккаунте Bybit\n\n"
                 . '⚠️ Торговля с плечом рискованна. Прошлые результаты не гарантируют будущих.',
-                Settings::get('webapp_url') !== '' ? Telegram::appButton() : null);
+                Telegram::homeKeyboard());
+            return;
+        }
+        if ($text === '/menu') {
+            $markup = Telegram::homeKeyboard();
+            Telegram::send($m['chat']['id'], '📋 Меню', $markup ?: null);
         }
     }
 

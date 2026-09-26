@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="uk">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
@@ -14,7 +14,7 @@
     <header class="top">
       <div>
         <div class="hello" id="hello">AI Trader</div>
-        <div class="sub" id="modeLine">Загрузка…</div>
+        <div class="sub" id="modeLine" data-i18n="loading">Завантаження…</div>
       </div>
       <div class="pill" id="statusPill"><span class="dot"></span><span id="statusText">—</span></div>
     </header>
@@ -23,32 +23,32 @@
       <!-- ГЛАВНАЯ -->
       <section class="screen active" id="s-home">
         <div class="hero card">
-          <div class="label">Баланс</div>
+          <div class="label" data-i18n="balance">Баланс</div>
           <div class="hero-num" id="equity">—</div>
-          <div class="hero-sub"><span id="todayPnl" class="num">—</span> сегодня</div>
-          <button class="btn primary big" id="toggleBtn">Запустить бота</button>
+          <div class="hero-sub"><span id="todayPnl" class="num">—</span> <span data-i18n="today_suffix">сьогодні</span></div>
+          <button class="btn primary big" id="toggleBtn" data-i18n="start_bot">Запустити бота</button>
           <div class="hint" id="statusDetail"></div>
         </div>
 
         <div class="tiles">
-          <div class="tile"><div class="label">Сегодня</div><div class="val num" id="kToday">—</div><div class="mini" id="kTodayN"></div></div>
-          <div class="tile"><div class="label">7 дней</div><div class="val num" id="kWeek">—</div><div class="mini" id="kWeekN"></div></div>
-          <div class="tile"><div class="label">30 дней</div><div class="val num" id="kMonth">—</div><div class="mini" id="kMonthN"></div></div>
-          <div class="tile"><div class="label">Винрейт 30д</div><div class="val num" id="kWin">—</div><div class="mini">прибыльных сделок</div></div>
+          <div class="tile"><div class="label" data-i18n="today">Сьогодні</div><div class="val num" id="kToday">—</div><div class="mini" id="kTodayN"></div></div>
+          <div class="tile"><div class="label" data-i18n="days7">7 днів</div><div class="val num" id="kWeek">—</div><div class="mini" id="kWeekN"></div></div>
+          <div class="tile"><div class="label" data-i18n="days30">30 днів</div><div class="val num" id="kMonth">—</div><div class="mini" id="kMonthN"></div></div>
+          <div class="tile"><div class="label" data-i18n="winrate30">Вінрейт 30д</div><div class="val num" id="kWin">—</div><div class="mini" data-i18n="winning_trades">прибуткових угод</div></div>
         </div>
 
         <div class="card">
-          <div class="card-h"><h3>Доходность</h3><span class="muted small">баланс, 30 дней</span></div>
+          <div class="card-h"><h3 data-i18n="profitability">Дохідність</h3><span class="muted small" data-i18n="balance_30d">баланс, 30 днів</span></div>
           <div class="chart" id="equityChart"></div>
         </div>
 
         <div class="card">
-          <div class="card-h"><h3>По стратегиям</h3><span class="muted small">PnL за 30 дней</span></div>
+          <div class="card-h"><h3 data-i18n="by_strategy">За стратегіями</h3><span class="muted small" data-i18n="pnl_30d">PnL за 30 днів</span></div>
           <div id="stratBars"></div>
         </div>
 
         <div class="card">
-          <div class="card-h"><h3>Сейчас в работе</h3></div>
+          <div class="card-h"><h3 data-i18n="in_progress">Зараз у роботі</h3></div>
           <div id="liveList" class="list"></div>
         </div>
       </section>
@@ -57,36 +57,36 @@
       <section class="screen" id="s-cal">
         <div class="card">
           <div class="cal-nav">
-            <button class="icon-btn" id="prevM" aria-label="Предыдущий месяц">‹</button>
+            <button class="icon-btn" id="prevM" data-i18n-aria="prev_month" aria-label="Попередній місяць">‹</button>
             <div class="cal-title" id="calTitle">—</div>
-            <button class="icon-btn" id="nextM" aria-label="Следующий месяц">›</button>
+            <button class="icon-btn" id="nextM" data-i18n-aria="next_month" aria-label="Наступний місяць">›</button>
           </div>
-          <div class="cal-grid cal-head"><span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span></div>
+          <div class="cal-grid cal-head" id="calHead"><span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Нд</span></div>
           <div class="cal-grid" id="calGrid"></div>
-          <div class="legend"><span class="sw loss"></span>убыток<span class="sw zero"></span>нет сделок<span class="sw win"></span>прибыль</div>
+          <div class="legend"><span class="sw loss"></span><span data-i18n="loss">збиток</span><span class="sw zero"></span><span data-i18n="no_trades">немає угод</span><span class="sw win"></span><span data-i18n="profit">прибуток</span></div>
         </div>
         <div class="tiles">
-          <div class="tile"><div class="label">Итог месяца</div><div class="val num" id="mTotal">—</div></div>
-          <div class="tile"><div class="label">Сделок</div><div class="val num" id="mTrades">—</div><div class="mini" id="mWin"></div></div>
-          <div class="tile"><div class="label">Лучший день</div><div class="val num" id="mBest">—</div></div>
-          <div class="tile"><div class="label">Дни + / −</div><div class="val num" id="mDays">—</div></div>
+          <div class="tile"><div class="label" data-i18n="month_total">Підсумок місяця</div><div class="val num" id="mTotal">—</div></div>
+          <div class="tile"><div class="label" data-i18n="trades_count">Угод</div><div class="val num" id="mTrades">—</div><div class="mini" id="mWin"></div></div>
+          <div class="tile"><div class="label" data-i18n="best_day">Найкращий день</div><div class="val num" id="mBest">—</div></div>
+          <div class="tile"><div class="label" data-i18n="days_plus_minus">Дні + / −</div><div class="val num" id="mDays">—</div></div>
         </div>
       </section>
 
       <!-- СДЕЛКИ -->
       <section class="screen" id="s-trades">
-        <div class="card"><div class="card-h"><h3>Последние сделки</h3></div><div id="tradeList" class="list"></div></div>
+        <div class="card"><div class="card-h"><h3 data-i18n="recent_trades">Останні угоди</h3></div><div id="tradeList" class="list"></div></div>
       </section>
 
       <!-- ИИ -->
       <section class="screen" id="s-ai">
         <div class="card ai-intro">
-          <h3>🧠 ИИ-аналитик</h3>
-          <p class="muted small" id="aiNote">ИИ каждые 30 минут оценивает режим рынка по каждой монете и распределяет капитал между стратегиями. Бот учится: стратегии, которые теряют на монете, получают меньше капитала.</p>
+          <h3 data-i18n="ai_analyst_title">🧠 ІІ-аналітик</h3>
+          <p class="muted small" id="aiNote" data-i18n="ai_note_default">ІІ кожні 30 хвилин оцінює режим ринку по кожній монеті та розподіляє капітал між стратегіями.</p>
         </div>
         <div id="marketList"></div>
         <div class="card">
-          <div class="card-h"><h3>Уроки из прошлых сделок</h3></div>
+          <div class="card-h"><h3 data-i18n="lessons_title">Уроки з минулих угод</h3></div>
           <ul id="lessons" class="lessons"></ul>
         </div>
       </section>
@@ -94,63 +94,68 @@
       <!-- НАСТРОЙКИ -->
       <section class="screen" id="s-set">
         <div class="card">
-          <div class="card-h"><h3>Где торговать</h3></div>
-          <div class="seg" id="modeSeg">
-            <button data-v="paper">Демо-счёт</button>
-            <button data-v="exchange">Мой Bybit</button>
-          </div>
-          <p class="muted small" id="modeHint"></p>
-          <button class="btn ghost small-btn" id="paperReset">Сбросить демо-счёт</button>
+          <div class="card-h"><h3 data-i18n="language">Мова інтерфейсу</h3></div>
+          <div class="seg" id="langSeg"><button data-v="uk">🇺🇦 Українська</button><button data-v="ru">🇷🇺 Русский</button></div>
         </div>
 
         <div class="card">
-          <div class="card-h"><h3>Риск-профиль</h3></div>
+          <div class="card-h"><h3 data-i18n="where_trade">Де торгувати</h3></div>
+          <div class="seg" id="modeSeg">
+            <button data-v="paper" data-i18n="demo_account">Демо-рахунок</button>
+            <button data-v="exchange" data-i18n="my_bybit">Мій Bybit</button>
+          </div>
+          <p class="muted small" id="modeHint"></p>
+          <button class="btn ghost small-btn" id="paperReset" data-i18n="reset_paper">Скинути демо-рахунок</button>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><h3 data-i18n="risk_profile">Ризик-профіль</h3></div>
           <div id="profiles" class="profiles"></div>
         </div>
 
         <div class="card">
-          <div class="card-h"><h3>Монеты</h3><span class="muted small">до 8</span></div>
+          <div class="card-h"><h3 data-i18n="coins">Монети</h3><span class="muted small" data-i18n="up_to_8">до 8</span></div>
           <div id="coins" class="chips"></div>
         </div>
 
         <div class="card">
-          <div class="card-h"><h3>Стратегии</h3></div>
-          <label class="switch-row"><div><b>Сетка</b><div class="muted small">много мелких сделок в боковике</div></div><input type="checkbox" data-s="grid"></label>
-          <label class="switch-row"><div><b>Тренд</b><div class="muted small">вход на откате, короткий тейк</div></div><input type="checkbox" data-s="trend"></label>
-          <label class="switch-row"><div><b>Ликвидации</b><div class="muted small">отскок после каскада ликвидаций</div></div><input type="checkbox" data-s="liquidation"></label>
-          <button class="btn primary" id="saveSettings">Сохранить</button>
+          <div class="card-h"><h3 data-i18n="strategies">Стратегії</h3></div>
+          <label class="switch-row"><div><b data-i18n="grid_title">Сітка</b><div class="muted small" data-i18n="grid_desc">багато дрібних угод у боковику</div></div><input type="checkbox" data-s="grid"></label>
+          <label class="switch-row"><div><b data-i18n="trend_title">Тренд</b><div class="muted small" data-i18n="trend_desc">вхід на відкаті, короткий тейк</div></div><input type="checkbox" data-s="trend"></label>
+          <label class="switch-row"><div><b data-i18n="liquidation_title">Ліквідації</b><div class="muted small" data-i18n="liquidation_desc">відскок після каскаду ліквідацій</div></div><input type="checkbox" data-s="liquidation"></label>
+          <button class="btn primary" id="saveSettings" data-i18n="save">Зберегти</button>
         </div>
 
         <div class="card" id="exchangeCard">
-          <div class="card-h"><h3>Подключение Bybit</h3><span class="badge" id="exBadge">не подключено</span></div>
+          <div class="card-h"><h3 data-i18n="bybit_connection">Підключення Bybit</h3><span class="badge" id="exBadge" data-i18n="not_connected">не підключено</span></div>
           <ol class="steps small">
-            <li>Зарегистрируйтесь по <a id="refLink" href="#" target="_blank">нашей ссылке</a> (обязательно для реального счёта).</li>
-            <li>Bybit → Профиль → API → Создать ключ → «Системный». Права: <b>Contract — Orders, Positions</b>.</li>
-            <li><b>Не включайте вывод средств (Withdraw).</b> Ключи хранятся в зашифрованном виде.</li>
+            <li data-i18n-html="step1">Зареєструйтесь за <a id="refLink" href="#" target="_blank">нашим посиланням</a> (обов'язково для реального рахунку).</li>
+            <li data-i18n-html="step2">Bybit → Профіль → API → Створити ключ → «Системний». Права: <b>Contract — Orders, Positions</b>.</li>
+            <li data-i18n-html="step3"><b>Не вмикайте виведення коштів (Withdraw).</b> Ключі зберігаються в зашифрованому вигляді.</li>
           </ol>
-          <div class="seg" id="exModeSeg"><button data-v="demo">Демо-счёт Bybit</button><button data-v="live">Реальный счёт</button></div>
+          <div class="seg" id="exModeSeg"><button data-v="demo" data-i18n="bybit_demo">Демо-рахунок Bybit</button><button data-v="live" data-i18n="bybit_live">Реальний рахунок</button></div>
           <input class="inp" id="apiKey" placeholder="API Key" autocomplete="off">
           <input class="inp" id="apiSecret" placeholder="API Secret" type="password" autocomplete="off">
-          <button class="btn primary" id="connectBtn">Подключить</button>
-          <button class="btn ghost" id="disconnectBtn" hidden>Отключить биржу</button>
+          <button class="btn primary" id="connectBtn" data-i18n="connect">Підключити</button>
+          <button class="btn ghost" id="disconnectBtn" data-i18n="disconnect_exchange" hidden>Відключити біржу</button>
         </div>
 
         <div class="card">
-          <div class="card-h"><h3>Подписка</h3><span class="badge" id="subBadge">нет</span></div>
-          <p class="muted small">Демо-счёт бесплатно. Для торговли на вашем Bybit нужна подписка. Оплата звёздами Telegram.</p>
+          <div class="card-h"><h3 data-i18n="subscription">Підписка</h3><span class="badge" id="subBadge" data-i18n="none">немає</span></div>
+          <p class="muted small" data-i18n="subscription_note">Демо-рахунок безкоштовно. Для торгівлі на вашому Bybit потрібна підписка. Оплата зірками Telegram.</p>
           <div id="plans" class="plans"></div>
         </div>
 
-        <p class="disclaimer">Торговля фьючерсами с плечом сопряжена с высоким риском потери средств. Бот не гарантирует прибыль. Прошлые результаты не гарантируют будущих.</p>
+        <p class="disclaimer" data-i18n="disclaimer">Торгівля ф'ючерсами з плечем пов'язана з високим ризиком втрати коштів.</p>
       </section>
     </main>
 
     <nav class="tabs">
-      <button data-t="home" class="active"><span>📈</span>Главная</button>
-      <button data-t="cal"><span>📅</span>Календарь</button>
-      <button data-t="trades"><span>📋</span>Сделки</button>
-      <button data-t="ai"><span>🧠</span>ИИ</button>
-      <button data-t="set"><span>⚙️</span>Настройки</button>
+      <button data-t="home" class="active"><span class="ico">📈</span><span data-i18n="nav_home">Головна</span></button>
+      <button data-t="cal"><span class="ico">📅</span><span data-i18n="nav_cal">Календар</span></button>
+      <button data-t="trades"><span class="ico">📋</span><span data-i18n="nav_trades">Угоди</span></button>
+      <button data-t="ai"><span class="ico">🧠</span><span data-i18n="nav_ai">ІІ</span></button>
+      <button data-t="set"><span class="ico">⚙️</span><span data-i18n="nav_set">Налаштування</span></button>
     </nav>
 
     <div class="sheet-bg" id="sheetBg" hidden></div>
@@ -162,6 +167,7 @@
     <div class="toast" id="toast" hidden></div>
     <div class="tip" id="tip" hidden></div>
   </div>
+  <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

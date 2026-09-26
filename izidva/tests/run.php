@@ -237,7 +237,7 @@ test('миграции на пустую базу и повторно', function
     $applied = Migrator::run($pdo);
     check(count($applied) === count(Migrator::files()), 'все миграции');
     check(Migrator::run($pdo) === [], 'повторный запуск ничего не делает');
-    check((int)DB::val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()") === 19, '19 таблиц');
+    check((int)DB::val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()") === 20, '20 таблиц');
 });
 test('настройки: секреты шифруются', function () {
     Settings::save(['anthropic_api_key' => 'sk-ant-1234', 'ai_interval_min' => '15', 'symbols' => 'btcusdt, ethusdt', 'require_referral' => 'false']);

@@ -43,4 +43,30 @@ final class Http
         }
         return $data;
     }
+
+    /** multipart/form-data POST (загрузка файла, например фото в Telegram). $fields может содержать CURLFile. */
+    public static function postMultipart(string $url, array $fields, int $timeout = 30): array
+    {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $fields,
+            CURLOPT_TIMEOUT => $timeout,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_USERAGENT => 'izidva-trader/1.0',
+        ]);
+        $resp = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err = curl_error($ch);
+        curl_close($ch);
+        if ($resp === false) {
+            throw new RuntimeException("HTTP POST $url: $err");
+        }
+        $data = json_decode((string)$resp, true);
+        if (!is_array($data)) {
+            throw new RuntimeException("HTTP $code: некорректный ответ " . mb_substr((string)$resp, 0, 200));
+        }
+        return $data;
+    }
 }

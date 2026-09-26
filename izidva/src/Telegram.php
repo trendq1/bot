@@ -47,6 +47,51 @@ final class Telegram
         return ['inline_keyboard' => [[['text' => '🚀 Открыть AI Trader', 'web_app' => ['url' => Settings::get('webapp_url')]]]]];
     }
 
+    /** Кнопки нижнего меню бота (админ-панель → «Меню»): каждая своей строкой под сообщением. */
+    public static function menuButtons(): array
+    {
+        $rows = [];
+        foreach (\App\DB::all('SELECT title, url FROM bot_menu_buttons WHERE enabled = 1 ORDER BY sort_order, id') as $b) {
+            $rows[] = [['text' => $b['title'], 'url' => $b['url']]];
+        }
+        return $rows;
+    }
+
+    /** /start и /menu: кнопка мини-аппа (если задан адрес) + кнопки, добавленные админом. */
+    public static function homeKeyboard(): ?array
+    {
+        $rows = [];
+        if (Settings::get('webapp_url') !== '') {
+            $rows[] = [['text' => '🚀 Открыть AI Trader', 'web_app' => ['url' => Settings::get('webapp_url')]]];
+        }
+        $rows = array_merge($rows, self::menuButtons());
+        return $rows ? ['inline_keyboard' => $rows] : null;
+    }
+
+    /** Отправка фото (для рассылки с картинкой) — caption поддерживает parse_mode HTML. */
+    public static function sendPhoto(int|string $chatId, string $filePath, string $caption = '', ?array $markup = null): bool
+    {
+        try {
+            $token = (string)Settings::get('bot_token');
+            if ($token === '') {
+                throw new RuntimeException('Токен Telegram-бота не задан');
+            }
+            $fields = ['chat_id' => (string)$chatId, 'caption' => $caption, 'parse_mode' => 'HTML',
+                'photo' => new \CURLFile($filePath)];
+            if ($markup) {
+                $fields['reply_markup'] = json_encode($markup, JSON_UNESCAPED_UNICODE);
+            }
+            $r = Http::postMultipart("https://api.telegram.org/bot$token/sendPhoto", $fields);
+            if (empty($r['ok'])) {
+                throw new RuntimeException($r['description'] ?? 'ошибка');
+            }
+            return true;
+        } catch (\Throwable $e) {
+            Log::warn("telegram sendPhoto $chatId: " . $e->getMessage());
+            return false;
+        }
+    }
+
     /** Подключает webhook и кнопку меню. Вызывается при установке и при смене токена/адреса. */
     public static function setup(string $baseUrl): void
     {
