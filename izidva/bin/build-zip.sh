@@ -8,7 +8,7 @@ OUT="${1:-izidva.zip}"
 rm -f "$OUT"
 TMP="$(mktemp -d)"
 mkdir -p "$TMP/izidva"
-tar --exclude=./storage/.env --exclude='./storage/logs/*.log' --exclude=./storage/SETUP_CODE.txt \
+tar --exclude=./storage/.env --exclude='./storage/logs/*.log' --exclude=./storage/setup_code.php \
     --exclude=./storage/login_attempts.json --exclude=./storage/setup_attempts --exclude=./storage/daemon.lock \
     --exclude=./tests --exclude='.git' --exclude='./*.zip' --exclude='./vendor/*/*/tests' --exclude='./vendor/*/*/docs' \
     --exclude='./vendor/*/*/examples' -cf - . | tar -xf - -C "$TMP/izidva"

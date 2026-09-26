@@ -1,5 +1,5 @@
 storage/.env
-storage/SETUP_CODE.txt
+storage/setup_code.php
 storage/login_attempts.json
 storage/setup_attempts
 storage/daemon.lock

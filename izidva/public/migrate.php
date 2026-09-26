@@ -1,7 +1,7 @@
 <?php
 /**
  * Установка и обновление базы данных.
- *  - Первый запуск: открыть https://ваш-домен/migrate.php в браузере, ввести код из storage/SETUP_CODE.txt,
+ *  - Первый запуск: открыть https://ваш-домен/migrate.php в браузере, ввести код из storage/setup_code.php,
  *    данные MySQL и логин администратора — будут созданы таблицы, storage/.env и администратор.
  *  - Обновление версии: загрузить новые файлы и снова открыть migrate.php (нужен вход в админ-панель) —
  *    применятся новые миграции из папки migrations/.
@@ -20,7 +20,7 @@ use App\Telegram;
 use App\Web\AdminApi;
 use App\Web\Api;
 
-const CODE_FILE = STORAGE_DIR . '/SETUP_CODE.txt';
+const CODE_FILE = STORAGE_DIR . '/setup_code.php';
 
 // ───────────── консоль ─────────────
 if (PHP_SAPI === 'cli') {
@@ -36,9 +36,11 @@ function setupCode(): string
 {
     if (!is_file(CODE_FILE)) {
         @mkdir(STORAGE_DIR, 0750, true);
-        file_put_contents(CODE_FILE, strtoupper(bin2hex(random_bytes(4))));
+        $code = strtoupper(bin2hex(random_bytes(4)));
+        file_put_contents(CODE_FILE, "<?php exit; // Код установки: $code\n");
     }
-    return trim((string)file_get_contents(CODE_FILE));
+    $raw = (string)file_get_contents(CODE_FILE);
+    return preg_match('/Код установки:\s*([A-Z0-9]+)/', $raw, $m) ? $m[1] : '';
 }
 
 function baseUrl(): string
@@ -75,7 +77,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         }
         if (strtoupper(trim((string)($b['code'] ?? ''))) !== setupCode()) {
             file_put_contents($attempts, (string)($fails + 1));
-            Api::fail(403, 'Неверный код установки. Он в файле storage/SETUP_CODE.txt.');
+            Api::fail(403, 'Неверный код установки. Он в файле storage/setup_code.php.');
         }
         $db = $b['db'] ?? [];
         try {
@@ -157,7 +159,7 @@ $e = fn($s) => htmlspecialchars((string)$s, ENT_QUOTES);
   <p class="muted">Заполните один раз — будут созданы таблицы в MySQL, файл настроек и администратор.</p>
   <div class="card">
     <h3>1. Код установки</h3>
-    <p class="muted small">Откройте файловым менеджером <b>storage/SETUP_CODE.txt</b> в папке проекта и вставьте код.</p>
+    <p class="muted small">Откройте файловым менеджером <b>storage/setup_code.php</b> в папке проекта (текстом, не в браузере) и вставьте код после «Код установки:».</p>
     <input class="inp" id="code" placeholder="Например A1B2C3D4" autocomplete="off">
   </div>
   <div class="card">
