@@ -17,9 +17,18 @@ if [ -z "$PY" ]; then
 fi
 echo "Python: $($PY --version)"
 
-if ! "$PY" -m venv --help >/dev/null 2>&1; then
-  echo "Нет модуля venv. Установите: sudo apt install -y python3-venv"; exit 1
+# venv + ensurepip (в Ubuntu/Debian — отдельный пакет python3.X-venv)
+if ! "$PY" -c 'import ensurepip, venv' >/dev/null 2>&1; then
+  VER=$("$PY" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
+  if [ "$(id -u)" = "0" ] && command -v apt-get >/dev/null 2>&1; then
+    echo "Устанавливаю python${VER}-venv…"
+    apt-get update -q && apt-get install -y -q "python${VER}-venv" python3-pip
+  else
+    echo "Нет модуля venv. Установите: sudo apt install -y python${VER}-venv python3-pip"; exit 1
+  fi
 fi
+# неполное окружение от прошлой неудачной попытки — пересоздаём
+if [ -d venv ] && [ ! -x venv/bin/pip ]; then rm -rf venv; fi
 [ -d venv ] || "$PY" -m venv venv
 venv/bin/pip install --upgrade pip -q
 venv/bin/pip install -r requirements.txt -q
