@@ -63,9 +63,8 @@ body::after { width: 240px; height: 240px; background: rgba(124,58,237,.18); top
 .card-h { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 8px; }
 .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 
-.hero { text-align: center; position: relative; overflow: hidden;
-  background: linear-gradient(150deg, rgba(22,201,141,.35), rgba(34,230,160,.12) 60%); border-color: rgba(34,230,160,.25); }
-.hero::after { content: ""; position: absolute; inset: 0; background: linear-gradient(120deg, rgba(255,255,255,.12), transparent 45%); pointer-events: none; }
+.hero { text-align: center; position: relative; overflow: hidden; background: var(--surface); border-color: var(--border); }
+.hero::after { content: ""; position: absolute; inset: 0; background: linear-gradient(120deg, rgba(255,255,255,.06), transparent 45%); pointer-events: none; }
 .hero-num { font-size: 40px; font-weight: 700; margin: 4px 0; letter-spacing: -.02em; animation: numIn .6s ease .1s both; }
 @keyframes numIn { from { opacity: 0; transform: translateY(6px) scale(.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
 .hero-sub { color: var(--text-2); margin-bottom: 14px; }
