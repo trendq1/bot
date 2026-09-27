@@ -8,7 +8,7 @@
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=10">
+  <link rel="stylesheet" href="styles.css?v=11">
 </head>
 <body>
   <div id="stars"></div>
@@ -85,6 +85,51 @@
           <div class="muted small" id="chartLiveInfo"></div>
         </div>
         <div class="card"><div class="card-h"><h3 data-i18n="recent_trades">Останні угоди</h3></div><div id="tradeList" class="list"></div></div>
+      </section>
+
+      <!-- КОМАНДА (партнёрська програма) -->
+      <section class="screen" id="s-team">
+        <div class="card team-head">
+          <div class="card-h"><h3 data-i18n="team_title">Партнерська програма</h3><span class="badge rank" id="teamRank">—</span></div>
+        </div>
+
+        <div class="hero card">
+          <div class="label" data-i18n="team_total_earned">Загальний дохід</div>
+          <div class="hero-num" id="teamTotal">—</div>
+          <div class="tiles" style="margin-top:14px">
+            <div class="tile"><div class="label" data-i18n="team_month">Цей місяць</div><div class="val num" id="teamMonth">—</div></div>
+            <div class="tile"><div class="label" data-i18n="team_size">Людей у команді</div><div class="val num" id="teamSize">—</div></div>
+            <div class="tile"><div class="label" data-i18n="team_pending">Очікує виплати</div><div class="val num" id="teamPending">—</div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><h3 data-i18n="team_link_title">Ваше посилання</h3></div>
+          <div class="ref-link"><span class="u" id="teamLink">—</span><button class="btn primary small-btn" id="teamCopy" style="margin-top:0; width:auto" data-i18n="copy">Копіювати</button></div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><h3 data-i18n="team_levels_title">Дохід по рівнях</h3></div>
+          <div id="teamLevels"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><h3 data-i18n="team_calc_title">Калькулятор доходу</h3></div>
+          <div class="calc-row">
+            <span data-i18n="team_calc_l1">Скільки людей запросите особисто</span>
+            <span class="stepper"><button data-calc="l1-" aria-label="-">−</button><b id="calcL1">5</b><button data-calc="l1+" aria-label="+">+</button></span>
+          </div>
+          <div class="calc-row">
+            <span data-i18n="team_calc_l2">В середньому запросить кожен</span>
+            <span class="stepper"><button data-calc="l2-" aria-label="-">−</button><b id="calcL2">3</b><button data-calc="l2+" aria-label="+">+</button></span>
+          </div>
+          <div class="calc-result"><b id="calcResult">≈ 0 $ / міс</b><div class="muted small" id="calcHint"></div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><h3 data-i18n="team_tree_title">Дерево команди</h3><span class="muted small" id="teamTreeCount"></span></div>
+          <div id="teamTree" class="list"></div>
+        </div>
       </section>
 
       <!-- ИИ -->
@@ -164,6 +209,7 @@
       <button data-t="home" class="active"><span class="ico"><svg viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg></span><span data-i18n="nav_home">Головна</span></button>
       <button data-t="cal"><span class="ico"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 9h18M8 3v4M16 3v4"/></svg></span><span data-i18n="nav_cal">Календар</span></button>
       <button data-t="trades"><span class="ico"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h10M7 17h6"/></svg></span><span data-i18n="nav_trades">Угоди</span></button>
+      <button data-t="team"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="10" r="2.4"/><path d="M3 20v-1c0-2.8 2.4-5 6-5s6 2.2 6 5v1"/><path d="M15.5 14.2c2.6.3 4.5 2.2 4.5 4.6V20"/></svg></span><span data-i18n="nav_team">Команда</span></button>
       <button data-t="ai"><span class="ico"><svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg></span><span data-i18n="nav_ai">ІІ</span></button>
       <button data-t="set"><span class="ico"><svg viewBox="0 0 24 24"><line x1="4" y1="6" x2="20" y2="6"/><circle cx="14" cy="6" r="2"/><line x1="4" y1="12" x2="20" y2="12"/><circle cx="8" cy="12" r="2"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="16" cy="18" r="2"/></svg></span><span data-i18n="nav_set">Налаштування</span></button>
     </nav>
@@ -177,7 +223,7 @@
     <div class="toast" id="toast" hidden></div>
     <div class="tip" id="tip" hidden></div>
   </div>
-  <script src="i18n.js?v=10"></script>
-  <script src="app.js?v=10"></script>
+  <script src="i18n.js?v=11"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

@@ -191,7 +191,7 @@ body::before {
 .sw.entry-sell { background: var(--loss); }
 .sw.exit-mark { background: var(--text-2); }
 
-.tabs { position: fixed; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(5, 1fr); background: rgba(7,11,9,.75); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); border-top: 1px solid var(--border); padding: 6px 4px calc(6px + env(safe-area-inset-bottom)); z-index: 10; }
+.tabs { position: fixed; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(6, 1fr); background: rgba(7,11,9,.75); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); border-top: 1px solid var(--border); padding: 6px 4px calc(6px + env(safe-area-inset-bottom)); z-index: 10; }
 .tabs button { position: relative; background: none; border: 0; color: var(--muted); font: 500 11px Inter, sans-serif; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px 0; cursor: pointer; transition: color .2s ease; }
 .tabs button .ico { width: 20px; height: 20px; }
 .tabs button .ico svg { width: 100%; height: 100%; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform .2s ease; }
@@ -205,3 +205,28 @@ body::before {
 .grab { width: 40px; height: 4px; border-radius: 2px; background: var(--border); margin: 0 auto 12px; }
 .toast { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%); background: #23262e; color: var(--text); padding: 10px 16px; border-radius: 12px; font-size: 14px; z-index: 40; max-width: 90%; text-align: center; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
 [hidden] { display: none !important; }
+
+/* ───────────── команда / партнёрка ───────────── */
+.badge.rank { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; font-weight: 600; }
+.ref-link { display: flex; align-items: center; gap: 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
+.ref-link .u { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-size: 13px; }
+.level-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); gap: 10px; }
+.level-row:last-child { border-bottom: 0; }
+.level-row .lv-pct { flex-shrink: 0; width: 40px; height: 40px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; background: var(--surface-2); color: var(--text-2); }
+.level-row.has .lv-pct { background: linear-gradient(135deg, rgba(106,92,255,.35), rgba(124,140,255,.2)); color: var(--text); }
+.level-row .lv-mid { flex: 1; min-width: 0; }
+.level-row .lv-mid b { font-size: 14px; }
+.level-row .lv-mid .muted { font-size: 12px; }
+.level-row .lv-r { text-align: right; flex-shrink: 0; }
+.level-row .lv-r .muted { font-size: 11px; }
+.calc-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; gap: 10px; }
+.stepper { display: flex; align-items: center; gap: 12px; }
+.stepper button { width: 30px; height: 30px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-size: 16px; cursor: pointer; }
+.stepper button:active { transform: scale(.92); }
+.stepper b { min-width: 18px; text-align: center; }
+.calc-result { margin-top: 10px; background: linear-gradient(135deg, rgba(106,92,255,.22), rgba(124,140,255,.1)); border: 1px solid var(--border); border-radius: 12px; padding: 14px; text-align: center; }
+.calc-result b { font-size: 20px; }
+.tree-row .avatar { width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+.tree-row .l { min-width: 0; }
+.tree-row .l b { font-weight: 600; }
+.tree-row .l .muted { font-size: 12px; }

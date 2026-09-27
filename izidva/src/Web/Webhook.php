@@ -5,6 +5,7 @@ namespace App\Web;
 
 use App\DB;
 use App\Log;
+use App\Referral;
 use App\Settings;
 use App\Telegram;
 
@@ -32,10 +33,17 @@ final class Webhook
         }
         $text = trim((string)($m['text'] ?? ''));
         if (str_starts_with($text, '/start') || $text === '/app') {
+            $isNew = !DB::val('SELECT 1 FROM users WHERE id = ?', [(int)$from['id']]);
             $user = MiniApi::ensureUser((int)$from['id'], $from['username'] ?? null, $from['first_name'] ?? null);
             if ($user['blocked']) {
                 Telegram::send($m['chat']['id'], 'Доступ заблокирован. Обратитесь в поддержку.');
                 return;
+            }
+            if ($isNew) {
+                $arg = trim(substr($text, 6));                        // "/start ref_123" -> "ref_123"
+                if (preg_match('/^ref_(\d+)$/', $arg, $mm)) {
+                    Referral::attach((int)$from['id'], (int)$mm[1]);
+                }
             }
             Telegram::send($m['chat']['id'],
                 "👋 <b>AI Trader для Bybit Futures</b>\n\n"
@@ -67,13 +75,14 @@ final class Webhook
                 $pdo->rollBack();
                 return;                                     // этот платёж уже учтён
             }
-            DB::insert('payments', ['user_id' => (int)$uid, 'plan' => $plan['code'], 'stars' => (int)$sp['total_amount'],
-                'usd' => round($sp['total_amount'] * Settings::get('stars_usd_rate'), 2), 'charge_id' => $sp['telegram_payment_charge_id'],
-                'created_at' => DB::now()]);
+            $usd = round($sp['total_amount'] * Settings::get('stars_usd_rate'), 2);
+            $paymentId = DB::insert('payments', ['user_id' => (int)$uid, 'plan' => $plan['code'], 'stars' => (int)$sp['total_amount'],
+                'usd' => $usd, 'charge_id' => $sp['telegram_payment_charge_id'], 'created_at' => DB::now()]);
             $cur = DB::val('SELECT sub_until FROM users WHERE id = ? FOR UPDATE', [(int)$uid]);
             $base = $cur && strtotime($cur . ' UTC') > time() ? strtotime($cur . ' UTC') : time();
             $until = $base + $plan['days'] * 86400;
             DB::update('users', ['sub_until' => gmdate('Y-m-d H:i:s', $until)], 'id = :id', [':id' => (int)$uid]);
+            Referral::creditForPayment((int)$uid, $paymentId, $usd);
             $pdo->commit();
         } catch (\Throwable $e) {
             $pdo->rollBack();

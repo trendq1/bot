@@ -10,6 +10,7 @@ use App\Engine\BybitExchange;
 use App\Engine\Risk;
 use App\Env;
 use App\NowPayments;
+use App\Referral;
 use App\Settings;
 use App\Telegram;
 
@@ -37,6 +38,7 @@ final class MiniApi
             ['GET', '/market'] => self::market(),
             ['GET', '/chart'] => self::chart($uid),
             ['POST', '/pay'] => self::pay($uid, $b),
+            ['GET', '/team'] => self::team($uid),
             default => Api::fail(404, 'Не найдено'),
         };
     }
@@ -355,5 +357,46 @@ final class MiniApi
             'invoice_id' => (string)($inv['id'] ?? ''), 'price_amount' => $usd, 'price_currency' => 'usd',
             'status' => 'waiting', 'invoice_url' => (string)$inv['invoice_url'], 'created_at' => DB::now()]);
         return ['link' => $inv['invoice_url'], 'method' => 'crypto'];
+    }
+
+    // ───────────── партнёрская программа ─────────────
+
+    private static function team(int $uid): array
+    {
+        if (!Settings::get('referral_program_enabled')) {
+            return ['enabled' => false];
+        }
+        $pct = Referral::levelPercents();
+        $counts = Referral::downlineCounts($uid);
+        $earnByLevel = array_column(DB::all('SELECT level, SUM(amount_usd) s FROM referral_earnings WHERE beneficiary_id = ? GROUP BY level', [$uid]), 's', 'level');
+        $levels = [];
+        $teamSize = 0;
+        foreach (range(1, 5) as $lvl) {
+            $teamSize += $counts[$lvl];
+            $levels[] = ['level' => $lvl, 'pct' => $pct[$lvl], 'people' => $counts[$lvl], 'earned' => round((float)($earnByLevel[$lvl] ?? 0), 2)];
+        }
+        $total = round((float)DB::val('SELECT SUM(amount_usd) FROM referral_earnings WHERE beneficiary_id = ?', [$uid]), 2);
+        $month = round((float)DB::val('SELECT SUM(amount_usd) FROM referral_earnings WHERE beneficiary_id = ? AND created_at >= ?',
+            [$uid, gmdate('Y-m-01 00:00:00')]), 2);
+        $pending = round((float)DB::val('SELECT SUM(amount_usd) FROM referral_earnings WHERE beneficiary_id = ? AND paid = 0', [$uid]), 2);
+        $botUsername = (string)Settings::get('bot_username');
+        $tree = [];
+        foreach (DB::all('SELECT id, username, first_name, created_at FROM users WHERE referred_by = ? ORDER BY created_at DESC LIMIT 30', [$uid]) as $r) {
+            $earned = round((float)DB::val('SELECT SUM(amount_usd) FROM referral_earnings WHERE beneficiary_id = ? AND level = 1 AND from_user_id = ?',
+                [$uid, $r['id']]), 2);
+            $tree[] = ['id' => $r['id'], 'name' => $r['first_name'] ?: ($r['username'] ?: ('ID' . $r['id'])),
+                'joined' => Api::iso($r['created_at']), 'sub_team' => array_sum(Referral::downlineCounts((int)$r['id'])), 'earned' => $earned];
+        }
+        return [
+            'enabled' => true,
+            'rank' => Referral::rank($teamSize),
+            'team_size' => $teamSize,
+            'total_earned' => $total,
+            'month_earned' => $month,
+            'pending_payout' => $pending,
+            'referral_link' => $botUsername !== '' ? "https://t.me/{$botUsername}?start=ref_{$uid}" : null,
+            'levels' => $levels,
+            'tree' => $tree,
+        ];
     }
 }

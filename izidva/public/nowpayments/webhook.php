@@ -7,6 +7,7 @@ require __DIR__ . '/../../src/bootstrap.php';
 use App\DB;
 use App\Log;
 use App\NowPayments;
+use App\Referral;
 use App\Settings;
 use App\Telegram;
 
@@ -57,12 +58,14 @@ try {
         $pdo->rollBack();
         exit;                                      // этот платёж уже начислен — IPN мог прийти повторно
     }
-    DB::insert('payments', ['user_id' => (int)$inv['user_id'], 'plan' => $plan['code'], 'stars' => 0, 'method' => 'crypto',
-        'usd' => round((float)$inv['price_amount'], 2), 'charge_id' => $chargeId, 'created_at' => DB::now()]);
+    $usd = round((float)$inv['price_amount'], 2);
+    $paymentId = DB::insert('payments', ['user_id' => (int)$inv['user_id'], 'plan' => $plan['code'], 'stars' => 0, 'method' => 'crypto',
+        'usd' => $usd, 'charge_id' => $chargeId, 'created_at' => DB::now()]);
     $cur = DB::val('SELECT sub_until FROM users WHERE id = ? FOR UPDATE', [(int)$inv['user_id']]);
     $base = $cur && strtotime($cur . ' UTC') > time() ? strtotime($cur . ' UTC') : time();
     $until = $base + $plan['days'] * 86400;
     DB::update('users', ['sub_until' => gmdate('Y-m-d H:i:s', $until)], 'id = :id', [':id' => (int)$inv['user_id']]);
+    Referral::creditForPayment((int)$inv['user_id'], $paymentId, $usd);
     $pdo->commit();
 } catch (Throwable $e) {
     $pdo->rollBack();

@@ -68,7 +68,7 @@ document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("cli
   document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("active", x === b));
   document.querySelectorAll(".screen").forEach((s) => s.classList.toggle("active", s.id === "s-" + b.dataset.t));
   haptic();
-  ({ home: loadHome, cal: loadCalendar, trades: loadTrades, ai: loadAI, set: renderSettings })[b.dataset.t]();
+  ({ home: loadHome, cal: loadCalendar, trades: loadTrades, team: loadTeam, ai: loadAI, set: renderSettings })[b.dataset.t]();
   window.scrollTo(0, 0);
 }));
 
@@ -370,6 +370,64 @@ async function loadAI() {
     $("lessons").innerHTML = r.lessons.map((l) => `<li>${esc(l)}</li>`).join("") || `<li class="muted">${t("lessons_placeholder")}</li>`;
   } catch (e) { toast(e.message); }
 }
+
+// ───────────── команда / партнёрка ─────────────
+const AVATAR_COLORS = ["#6a5cff", "#22e6a0", "#fab219", "#7fb3f2", "#ff8a86", "#7c8cff"];
+state.team = null;
+state.calc = { l1: 5, l2: 3 };
+
+function calcResult() {
+  if (!state.team) return;
+  const pct = (state.team.levels[0] && state.team.levels[0].pct) || 20;
+  const l1 = state.calc.l1, l2 = state.calc.l2;
+  const monthPlan = state.me && state.me.options.plans.find((p) => p.code === "month");
+  const planUsd = monthPlan ? monthPlan.usd : 15;
+  const monthly = l1 * planUsd * (pct / 100) + l1 * l2 * planUsd * ((state.team.levels[1] ? state.team.levels[1].pct : 5) / 100);
+  $("calcResult").textContent = `≈ ${monthly.toFixed(0)} $ / ${t("team_calc_month_short")}`;
+  $("calcHint").textContent = t("team_calc_hint", { plan: planUsd.toFixed(0) });
+}
+document.querySelectorAll("[data-calc]").forEach((b) => b.addEventListener("click", () => {
+  const [lvl, dir] = [b.dataset.calc.slice(0, 2), b.dataset.calc.slice(2)];
+  const key = lvl === "l1" ? "l1" : "l2";
+  state.calc[key] = Math.max(0, Math.min(50, state.calc[key] + (dir === "+" ? 1 : -1)));
+  $("calcL1").textContent = state.calc.l1; $("calcL2").textContent = state.calc.l2;
+  haptic(); calcResult();
+}));
+
+async function loadTeam() {
+  try {
+    const r = await api("/team");
+    state.team = r;
+    if (!r.enabled) {
+      $("s-team").innerHTML = `<div class="card empty">${t("team_disabled")}</div>`;
+      return;
+    }
+    $("teamRank").textContent = t("team_rank", { n: r.rank });
+    $("teamTotal").textContent = money(r.total_earned, false) + " $";
+    $("teamMonth").textContent = money(r.month_earned, false) + " $";
+    $("teamSize").textContent = r.team_size;
+    $("teamPending").textContent = money(r.pending_payout, false) + " $";
+    $("teamLink").textContent = r.referral_link || t("team_link_missing");
+    $("teamLevels").innerHTML = r.levels.map((lv) => `<div class="level-row ${lv.people ? "has" : ""}">
+      <div class="lv-pct">${lv.pct}%</div>
+      <div class="lv-mid"><b>${t("team_level_n", { n: lv.level })}${lv.level === 1 ? " · " + t("team_level1_hint") : ""}</b>
+        <div class="muted">${t("n_people", { n: lv.people })}</div></div>
+      <div class="lv-r"><b class="num pos">+${money(lv.earned, false)} $</b><div class="muted">${lv.people ? t("team_total_word") : t("team_no_people")}</div></div>
+    </div>`).join("");
+    calcResult();
+    $("teamTreeCount").textContent = t("team_tree_count", { n: r.tree.length });
+    $("teamTree").innerHTML = r.tree.map((p, i) => `<div class="row tree-row"><div class="l-wrap">
+        <span class="avatar" style="background:${AVATAR_COLORS[i % AVATAR_COLORS.length]}33;color:${AVATAR_COLORS[i % AVATAR_COLORS.length]}">${esc(p.name.slice(0, 1).toUpperCase())}</span>
+        <div class="l"><b>${esc(p.name)}</b><div class="muted">${new Date(p.joined).toLocaleDateString(locale())} · ${t("n_people", { n: p.sub_team })}</div></div>
+      </div><div class="r pos">+${money(p.earned, false)} $</div></div>`).join("") || `<div class="empty">${t("team_tree_empty")}</div>`;
+  } catch (e) { toast(e.message); }
+}
+$("teamCopy").addEventListener("click", async () => {
+  const link = state.team && state.team.referral_link;
+  if (!link) return;
+  try { await navigator.clipboard.writeText(link); toast(t("copied")); haptic("medium"); }
+  catch (e) { toast(link); }
+});
 
 // ───────────── настройки ─────────────
 $("langSeg").querySelectorAll("button").forEach((b) => {

@@ -12,6 +12,7 @@ final class Settings
     /** key => [type, default, label, group, secret, help] */
     public const FIELDS = [
         'bot_token' => ['str', '', 'Токен Telegram-бота', 'Telegram', true, 'от @BotFather'],
+        'bot_username' => ['str', '', 'Юзернейм бота (без @)', 'Telegram', false, 'для реферальных ссылок, например izidva_bot'],
         'webapp_url' => ['str', '', 'Адрес мини-аппа (HTTPS)', 'Telegram', false, 'https://ваш-домен/app/'],
         'support_contact' => ['str', '', 'Контакт поддержки', 'Telegram', false, 'например @support'],
         'anthropic_api_key' => ['str', '', 'Ключ Anthropic (Claude)', 'ИИ', true, ''],
@@ -39,6 +40,13 @@ final class Settings
         'nowpayments_api_key' => ['str', '', 'API-ключ NOWPayments', 'NOWPayments (крипта)', true, 'личный кабинет NOWPayments → API keys'],
         'nowpayments_ipn_secret' => ['str', '', 'IPN Secret Key NOWPayments', 'NOWPayments (крипта)', true,
             'личный кабинет → Settings → IPN — нужен для проверки подписи вебхука'],
+        'referral_program_enabled' => ['bool', true, 'Партнёрская программа включена', 'Партнёрка', false,
+            'начисление % рефереру при оплате подписки приглашённым — только с реальных оплат, демо-счёт бесплатный'],
+        'referral_pct_l1' => ['float', 20.0, 'Уровень 1 (прямые приглашения), %', 'Партнёрка', false, ''],
+        'referral_pct_l2' => ['float', 5.0, 'Уровень 2, %', 'Партнёрка', false, ''],
+        'referral_pct_l3' => ['float', 3.0, 'Уровень 3, %', 'Партнёрка', false, ''],
+        'referral_pct_l4' => ['float', 2.0, 'Уровень 4, %', 'Партнёрка', false, ''],
+        'referral_pct_l5' => ['float', 1.0, 'Уровень 5, %', 'Партнёрка', false, ''],
     ];
 
     private static ?array $cache = null;

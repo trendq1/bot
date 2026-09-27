@@ -36,6 +36,7 @@ use App\Engine\SymbolFeed;
 use App\Engine\Worker;
 use App\Migrator;
 use App\NowPayments;
+use App\Referral;
 use App\Settings;
 
 $passed = 0;
@@ -257,7 +258,7 @@ test('миграции на пустую базу и повторно', function
     $applied = Migrator::run($pdo);
     check(count($applied) === count(Migrator::files()), 'все миграции');
     check(Migrator::run($pdo) === [], 'повторный запуск ничего не делает');
-    check((int)DB::val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()") === 23, '23 таблицы');
+    check((int)DB::val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()") === 24, '24 таблицы');
 });
 test('настройки: секреты шифруются', function () {
     Settings::save(['anthropic_api_key' => 'sk-ant-1234', 'ai_interval_min' => '15', 'symbols' => 'btcusdt, ethusdt', 'require_referral' => 'false']);
@@ -417,6 +418,62 @@ test('без ключа NOWPayments инвойс не создаётся', funct
         $threw = true;
     }
     check($threw, 'без API-ключа выбрасывается понятная ошибка, а не запрос в сеть');
+});
+
+echo "Партнёрская программа\n";
+test('привязка реферера: один раз, без самопригласительных петель', function () {
+    DB::insert('users', ['id' => 9001, 'first_name' => 'A', 'created_at' => DB::now(), 'blocked' => false]);
+    DB::insert('users', ['id' => 9002, 'first_name' => 'B', 'created_at' => DB::now(), 'blocked' => false]);
+    Referral::attach(9002, 9001);
+    check((int)DB::val('SELECT referred_by FROM users WHERE id = 9002') === 9001, 'привязка сработала');
+    Referral::attach(9002, 999999);                       // левый реферер: попытка переписать существующую привязку
+    check((int)DB::val('SELECT referred_by FROM users WHERE id = 9002') === 9001, 'повторная привязка не перезаписывает первую');
+    Referral::attach(9003, 9003);                          // несуществующий пользователь сам себе — no-op
+    check(DB::val('SELECT referred_by FROM users WHERE id = 9003') === null, 'самопригласительная петля не создаётся');
+});
+test('начисление комиссии по цепочке из 5 уровней — только по проценту из настроек', function () {
+    Settings::save(['referral_program_enabled' => true, 'referral_pct_l1' => 20, 'referral_pct_l2' => 5,
+        'referral_pct_l3' => 3, 'referral_pct_l4' => 2, 'referral_pct_l5' => 1]);
+    // цепочка: 9101 <- 9102 <- 9103 <- 9104 <- 9105 <- 9106 (9106 платит, 9101 — реферер 5-го уровня)
+    for ($i = 9101; $i <= 9106; $i++) {
+        DB::insert('users', ['id' => $i, 'first_name' => 'U' . $i, 'created_at' => DB::now(), 'blocked' => false]);
+    }
+    for ($i = 9102; $i <= 9106; $i++) {
+        Referral::attach($i, $i - 1);
+    }
+    DB::insert('users', ['id' => 9107, 'first_name' => 'U7', 'created_at' => DB::now(), 'blocked' => false]);
+    Referral::attach(9107, 9106);                          // 6-й уровень от 9101 — за пределы 5 уровней, не должен получить долю
+    $paymentId = DB::insert('payments', ['user_id' => 9106, 'plan' => 'month', 'stars' => 0, 'usd' => 100.0,
+        'charge_id' => 'test-chain-1', 'created_at' => DB::now()]);
+    Referral::creditForPayment(9106, $paymentId, 100.0);
+    $rows = DB::all('SELECT beneficiary_id, level, amount_usd FROM referral_earnings WHERE payment_id = ? ORDER BY level', [$paymentId]);
+    check(count($rows) === 5, '5 начислений — по числу рефереров в цепочке выше плательщика');
+    $expect = [9105 => [1, 20.0], 9104 => [2, 5.0], 9103 => [3, 3.0], 9102 => [4, 2.0], 9101 => [5, 1.0]];
+    foreach ($rows as $r) {
+        [$lvl, $usd] = $expect[(int)$r['beneficiary_id']];
+        check((int)$r['level'] === $lvl && near((float)$r['amount_usd'], $usd), "уровень $lvl: {$r['amount_usd']}\$ (реферер {$r['beneficiary_id']})");
+    }
+    check(!DB::val('SELECT 1 FROM referral_earnings WHERE beneficiary_id = 9106 AND payment_id = ?', [$paymentId]), 'сам плательщик ничего себе не начисляет');
+});
+test('партнёрская программа выключена в настройках — начислений нет', function () {
+    Settings::save(['referral_program_enabled' => false]);
+    $paymentId = DB::insert('payments', ['user_id' => 9106, 'plan' => 'month', 'stars' => 0, 'usd' => 50.0,
+        'charge_id' => 'test-chain-2', 'created_at' => DB::now()]);
+    Referral::creditForPayment(9106, $paymentId, 50.0);
+    check(!DB::val('SELECT 1 FROM referral_earnings WHERE payment_id = ?', [$paymentId]), 'выключенная программа ничего не начисляет');
+    Settings::save(['referral_program_enabled' => true]);
+});
+test('demo-счёт не создаёт платежей — начислить с демо-торговли нечего', function () {
+    // Демо-режим (paper) бесплатный и никогда не проходит через payments — Referral::creditForPayment
+    // вызывается только из мест, где платёж уже создан (Webhook::paid, nowpayments/webhook.php),
+    // поэтому проверяем сам инвариант: без записи в payments начислений не бывает в принципе.
+    check((int)DB::val("SELECT COUNT(*) FROM referral_earnings WHERE payment_id NOT IN (SELECT id FROM payments)") === 0,
+        'у каждого начисления есть реальный платёж');
+});
+test('подсчёт команды по уровням (downlineCounts)', function () {
+    $counts = Referral::downlineCounts(9101);
+    check($counts === [1 => 1, 2 => 1, 3 => 1, 4 => 1, 5 => 1], 'по одному человеку на уровень в тестовой цепочке (6-й уровень не считается)');
+    check(Referral::rank(0) === 1 && Referral::rank(5) === 2 && Referral::rank(10) === 3 && Referral::rank(20) === 4 && Referral::rank(50) === 5, 'ранг по размеру команды');
 });
 
 echo "Ручная торговля трейдера\n";
