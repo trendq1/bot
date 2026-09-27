@@ -25,15 +25,6 @@ body { font: 15px/1.4 Inter, system-ui, -apple-system, sans-serif; position: rel
 h3 { margin: 0; font-size: 16px; font-weight: 600; }
 a { color: var(--accent); }
 
-/* фонові розмиті плями — стеклянные картки нижче "розмиваються" на них */
-body::before, body::after {
-  content: ""; position: fixed; border-radius: 50%; filter: blur(60px); z-index: 0; pointer-events: none;
-  animation: blobDrift 12s ease-in-out infinite;
-}
-body::before { width: 280px; height: 280px; background: rgba(34,230,160,.28); top: -60px; left: -80px; }
-body::after { width: 240px; height: 240px; background: rgba(124,58,237,.18); top: 40%; right: -80px; animation-direction: reverse; animation-duration: 15s; }
-@keyframes blobDrift { 0%, 100% { transform: translate(0,0) scale(1); } 50% { transform: translate(18px,-24px) scale(1.1); } }
-
 /* зоряне небо — крапки генеруються в app.js, тут лише вигляд і мерехтіння */
 #stars { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
 #stars i { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: #fff; opacity: .5; animation: twinkle 4s ease-in-out infinite; }
@@ -45,7 +36,7 @@ body::after { width: 240px; height: 240px; background: rgba(124,58,237,.18); top
 .sub { color: var(--muted); font-size: 13px; }
 .pill { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 99px; background: var(--surface-2); backdrop-filter: blur(14px) saturate(160%); -webkit-backdrop-filter: blur(14px) saturate(160%); border: 1px solid var(--border); font-size: 13px; color: var(--text-2); }
 .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-.pill.on .dot { background: var(--win); box-shadow: 0 0 0 4px rgba(34,230,160,.2); animation: dotPulse 1.6s ease infinite; }
+.pill.on .dot { background: var(--win); animation: dotPulse 1.6s ease infinite; }
 .pill.warn .dot { background: var(--warn); }
 @keyframes dotPulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
 
@@ -81,7 +72,7 @@ body::after { width: 240px; height: 240px; background: rgba(124,58,237,.18); top
 
 .btn { width: 100%; border: 0; border-radius: 12px; padding: 13px 16px; font: 600 15px Inter, sans-serif; cursor: pointer; margin-top: 10px; transition: transform .15s ease, box-shadow .15s ease; }
 .btn:active { transform: scale(.97); }
-.btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #04231a; box-shadow: 0 8px 22px rgba(34,230,160,.3); }
+.btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #04231a; }
 .btn.danger { background: #3a1d20; color: #ff8a86; }
 .btn.ghost { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border); }
 .btn.big { padding: 15px; font-size: 16px; }
@@ -100,24 +91,28 @@ body::after { width: 240px; height: 240px; background: rgba(124,58,237,.18); top
 .bar { position: absolute; top: 0; height: 10px; border-radius: 4px; }
 .bar-val { text-align: right; }
 
-.list .row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); gap: 10px; transition: background .15s ease; }
-.list .row:last-child { border-bottom: 0; }
+/* блок угоди/позиції — суцільна тонована картка (зелена/червона за результатом), а не рядок зі смужкою знизу */
+.list .row { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-radius: 14px; gap: 10px;
+  margin-bottom: 8px; background: var(--surface-2); transition: transform .15s ease; }
+.list .row:last-child { margin-bottom: 0; }
+.list .row:active { transform: scale(.98); }
+.list .row.pos { background: linear-gradient(120deg, rgba(34,230,160,.22), rgba(34,230,160,.05)); }
+.list .row.neg { background: linear-gradient(120deg, rgba(239,83,80,.2), rgba(239,83,80,.05)); }
 .l-wrap { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .row .l { min-width: 0; }
 .row .l b { font-weight: 600; }
 .row .l .muted { font-size: 12px; }
-.row .r { text-align: right; font-weight: 600; flex-shrink: 0; }
-.tag { display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 6px; background: var(--surface-2); color: var(--text-2); margin-left: 6px; font-weight: 500; }
+.row .r { text-align: right; font-weight: 700; flex-shrink: 0; }
+.tag { display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 6px; background: rgba(255,255,255,.1); color: var(--text-2); margin-left: 6px; font-weight: 500; }
 
-/* кольорові кружки-іконки монет: перші літери base-символу на кольоровому тлі */
-.coin-ic { flex-shrink: 0; width: 32px; height: 32px; border-radius: 10px; display: flex; align-items: center; justify-content: center;
-  font-size: 11px; font-weight: 700; text-transform: uppercase; }
+/* кольорові кружки-іконки монет: символ монети на кольоровому тлі */
+.coin-ic { flex-shrink: 0; width: 34px; height: 34px; border-radius: 10px; display: flex; align-items: center; justify-content: center;
+  font-size: 15px; font-weight: 700; }
 
 /* пілюлі-бейджі для сум прибутку/збитку та статусів у списках — замість простого кольорового тексту */
 .chip { display: inline-block; padding: 3px 10px; border-radius: 20px; }
 .chip.pos { background: rgba(34,230,160,.15); color: var(--win); }
 .chip.neg { background: rgba(239,83,80,.15); color: var(--loss); }
-.row .r.chip.muted { background: var(--surface-2); color: var(--text-2); font-weight: 600; font-size: 12px; }
 
 .cal-nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .cal-title { font-weight: 600; font-size: 17px; text-transform: capitalize; }
@@ -126,7 +121,7 @@ body::after { width: 240px; height: 240px; background: rgba(124,58,237,.18); top
 .day { aspect-ratio: 1 / 1.1; border-radius: 10px; font-size: 0; background: var(--neutral); display: flex; flex-direction: column; justify-content: space-between; padding: 5px 4px; cursor: pointer; border: 2px solid transparent; min-width: 0; transition: transform .15s ease; }
 .day:active { transform: scale(.93); }
 .day.blank { background: transparent; cursor: default; }
-.day.today { border-color: var(--accent); box-shadow: 0 0 12px rgba(34,230,160,.35); }
+.day.today { border-color: var(--accent); }
 .day .d { font-size: 11px; color: var(--text-2); }
 .day .p { font-size: 9.5px; font-weight: 600; text-align: right; overflow: hidden; white-space: nowrap; letter-spacing: -.02em; color: var(--text); }
 .legend { display: flex; align-items: center; gap: 6px; justify-content: center; font-size: 12px; color: var(--muted); margin-top: 12px; }
@@ -150,12 +145,12 @@ body::after { width: 240px; height: 240px; background: rgba(124,58,237,.18); top
 .seg button.on { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #04231a; }
 .profiles { display: grid; gap: 8px; }
 .profile { border: 1px solid var(--border); border-radius: 12px; padding: 12px; cursor: pointer; background: var(--surface-2); transition: border-color .2s ease, box-shadow .2s ease; }
-.profile.on { border-color: var(--accent-2); box-shadow: inset 0 0 0 1px var(--accent-2), 0 0 16px rgba(34,230,160,.2); }
+.profile.on { border-color: var(--accent-2); box-shadow: inset 0 0 0 1px var(--accent-2); }
 .profile .muted { font-size: 12px; margin-top: 2px; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip { border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2); padding: 8px 12px; border-radius: 99px; font: 500 13px Inter, sans-serif; cursor: pointer; transition: transform .15s ease; }
 .chip:active { transform: scale(.93); }
-.chip.on { background: linear-gradient(135deg, var(--accent), var(--accent-2)); border-color: transparent; color: #04231a; font-weight: 700; box-shadow: 0 4px 14px rgba(34,230,160,.3); }
+.chip.on { background: linear-gradient(135deg, var(--accent), var(--accent-2)); border-color: transparent; color: #04231a; font-weight: 700; }
 .switch-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); gap: 12px; }
 .switch-row input { appearance: none; width: 44px; height: 26px; border-radius: 13px; background: var(--neutral); position: relative; cursor: pointer; flex: none; transition: background .15s; }
 .switch-row input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .15s; }

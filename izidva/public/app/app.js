@@ -31,11 +31,17 @@ const REGIME = () => ({ trend_up: t("regime_trend_up"), trend_down: t("regime_tr
 
 // ───────────── утилиты ─────────────
 const COIN_COLORS = ["#f7931a", "#8ba4ff", "#14f195", "#7d92ff", "#22e6a0", "#fab219", "#8b5cf6", "#22c3e6"];
+/** Символ монети замість двох літер — де відомого символу нема, показуємо першу літеру base-тикера. */
+const COIN_SYMBOLS = {
+  BTC: "₿", ETH: "Ξ", SOL: "◎", XRP: "✕", ADA: "₳", DOGE: "Ð", LTC: "Ł", BNB: "Ƀ",
+  TRX: "T", DOT: "●", LINK: "⬡", AVAX: "▲", MATIC: "⬣", TON: "◈",
+};
 function coinIcon(symbol) {
   const base = String(symbol).replace(/USDT$/, "");
   let h = 0; for (let i = 0; i < base.length; i++) h = (h * 31 + base.charCodeAt(i)) >>> 0;
   const c = COIN_COLORS[h % COIN_COLORS.length];
-  return `<span class="coin-ic" style="background:${c}26;color:${c}">${esc(base.slice(0, 2))}</span>`;
+  const glyph = COIN_SYMBOLS[base] || base.slice(0, 1);
+  return `<span class="coin-ic" style="background:${c}26;color:${c}">${esc(glyph)}</span>`;
 }
 async function api(path, opts = {}) {
   const res = await fetch("../api/index.php" + path, {
@@ -99,8 +105,8 @@ $("toggleBtn").addEventListener("click", async () => {
 function renderLive(live) {
   const strat = STRAT();
   const rows = [];
-  (live?.grids || []).forEach((g) => rows.push(`<div class="row"><div class="l-wrap">${coinIcon(g.symbol)}<div class="l"><b>${esc(g.symbol)}</b><span class="tag">${g.mode === "long" ? t("grid_long") : t("grid_short")}</span><div class="muted">${t("grid_step_filled", { step: g.step_pct, filled: g.filled, levels: g.levels })}</div></div></div><div class="r muted chip">${t("grid_tag")}</div></div>`));
-  (live?.directional || []).forEach((d) => rows.push(`<div class="row"><div class="l-wrap">${coinIcon(d.symbol)}<div class="l"><b>${esc(d.symbol)}</b><span class="tag">${strat[d.strategy] || d.strategy}</span><div class="muted">${d.entry} · ${d.stop}</div></div></div><div class="r chip ${d.side === "Buy" ? "pos" : "neg"}">${d.side === "Buy" ? "LONG" : "SHORT"}</div></div>`));
+  (live?.grids || []).forEach((g) => rows.push(`<div class="row"><div class="l-wrap">${coinIcon(g.symbol)}<div class="l"><b>${esc(g.symbol)}</b><span class="tag">${g.mode === "long" ? t("grid_long") : t("grid_short")}</span><div class="muted">${t("grid_step_filled", { step: g.step_pct, filled: g.filled, levels: g.levels })}</div></div></div><div class="r muted">${t("grid_tag")}</div></div>`));
+  (live?.directional || []).forEach((d) => rows.push(`<div class="row ${d.side === "Buy" ? "pos" : "neg"}"><div class="l-wrap">${coinIcon(d.symbol)}<div class="l"><b>${esc(d.symbol)}</b><span class="tag">${strat[d.strategy] || d.strategy}</span><div class="muted">${d.entry} · ${d.stop}</div></div></div><div class="r ${d.side === "Buy" ? "pos" : "neg"}">${d.side === "Buy" ? "LONG" : "SHORT"}</div></div>`));
   $("liveList").innerHTML = rows.join("") || `<div class="empty">${t("no_open_positions")}</div>`;
 }
 
@@ -264,9 +270,9 @@ $("sheetBg").addEventListener("click", () => { $("sheet").hidden = true; $("shee
 // ───────────── сделки ─────────────
 function tradeRow(row) {
   const strat = STRAT();
-  return `<div class="row"><div class="l-wrap">${coinIcon(row.symbol)}<div class="l"><b>${esc(row.symbol)}</b><span class="tag">${strat[row.strategy] || esc(row.strategy)}</span>
+  return `<div class="row ${cls(row.pnl)}"><div class="l-wrap">${coinIcon(row.symbol)}<div class="l"><b>${esc(row.symbol)}</b><span class="tag">${strat[row.strategy] || esc(row.strategy)}</span>
     <div class="muted">${row.date ? esc(row.date) + " " : ""}${esc(row.time)} · ${row.side === "Buy" ? t("long") : t("short")} ${row.entry} → ${row.exit}</div></div></div>
-    <div class="r num chip ${cls(row.pnl)}">${money(row.pnl)}</div></div>`;
+    <div class="r num ${cls(row.pnl)}">${money(row.pnl)}</div></div>`;
 }
 async function loadTrades() {
   try {
