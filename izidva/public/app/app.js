@@ -2,10 +2,25 @@
 const tg = window.Telegram ? window.Telegram.WebApp : null;
 if (tg) {
   tg.ready(); tg.expand();
-  try { tg.setHeaderColor("#0d0f13"); tg.setBackgroundColor("#0d0f13"); } catch (e) {}
+  try { tg.setHeaderColor("#070b09"); tg.setBackgroundColor("#070b09"); } catch (e) {}
   try { tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch (e) {}   // не сворачивать приложение свайпом вниз
 }
 applyI18n();
+
+(function stars() {
+  const box = document.getElementById("stars");
+  if (!box) return;
+  const n = window.innerWidth < 400 ? 50 : 80;
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < n; i++) {
+    const s = document.createElement("i");
+    s.style.left = Math.random() * 100 + "%";
+    s.style.top = Math.random() * 100 + "%";
+    s.style.animationDelay = (Math.random() * 4).toFixed(2) + "s";
+    frag.appendChild(s);
+  }
+  box.appendChild(frag);
+})();
 
 const TZ = -new Date().getTimezoneOffset();
 const $ = (id) => document.getElementById(id);
