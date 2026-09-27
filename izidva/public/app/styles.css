@@ -1,14 +1,14 @@
 :root {
   color-scheme: dark;
-  --bg: #070b09;
-  --surface: rgba(255,255,255,.055);
+  --bg: #07080d;
+  --surface: rgba(255,255,255,.045);
   --surface-2: rgba(255,255,255,.07);
   --border: rgba(255,255,255,.09);
-  --text: #f2f7f4;
-  --text-2: #aeb8b3;
-  --muted: #7f8c86;
-  --accent: #16c98d;
-  --accent-2: #22e6a0;
+  --text: #eef0f6;
+  --text-2: #cdd2de;
+  --muted: #8b90a3;
+  --accent: #6a5cff;
+  --accent-2: #7c8cff;
   --violet: #7c8cff;
   --win: #22e6a0;
   --loss: #ef5350;
@@ -29,6 +29,13 @@ a { color: var(--accent); }
 #stars { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
 #stars i { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: #fff; opacity: .5; animation: twinkle 4s ease-in-out infinite; }
 @keyframes twinkle { 0%, 100% { opacity: .12; } 50% { opacity: .8; } }
+
+/* одна ледь помітна фіолетова пляма на фоні — без зеленого акценту */
+body::before {
+  content: ""; position: fixed; width: 260px; height: 260px; border-radius: 50%; background: var(--violet); opacity: .18;
+  filter: blur(60px); top: -60px; left: -70px; z-index: 0; pointer-events: none; animation: blobDrift 14s ease-in-out infinite;
+}
+@keyframes blobDrift { 0%, 100% { transform: translate(0,0) scale(1); } 50% { transform: translate(16px,-20px) scale(1.08); } }
 
 #app { position: relative; z-index: 1; max-width: 560px; margin: 0 auto; padding: 12px 16px calc(84px + env(safe-area-inset-bottom)); }
 .top { display: flex; justify-content: space-between; align-items: center; margin: 4px 0 14px; }
@@ -72,7 +79,7 @@ a { color: var(--accent); }
 
 .btn { width: 100%; border: 0; border-radius: 12px; padding: 13px 16px; font: 600 15px Inter, sans-serif; cursor: pointer; margin-top: 10px; transition: transform .15s ease, box-shadow .15s ease; }
 .btn:active { transform: scale(.97); }
-.btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #04231a; }
+.btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; }
 .btn.danger { background: #3a1d20; color: #ff8a86; }
 .btn.ghost { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border); }
 .btn.big { padding: 15px; font-size: 16px; }
@@ -142,7 +149,7 @@ a { color: var(--accent); }
 
 .seg { display: grid; grid-template-columns: 1fr 1fr; background: var(--surface-2); border-radius: 12px; padding: 4px; gap: 4px; margin-bottom: 10px; }
 .seg button { border: 0; background: transparent; color: var(--text-2); padding: 10px; border-radius: 9px; font: 600 14px Inter, sans-serif; cursor: pointer; transition: background .15s ease; }
-.seg button.on { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #04231a; }
+.seg button.on { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; }
 .profiles { display: grid; gap: 8px; }
 .profile { border: 1px solid var(--border); border-radius: 12px; padding: 12px; cursor: pointer; background: var(--surface-2); transition: border-color .2s ease, box-shadow .2s ease; }
 .profile.on { border-color: var(--accent-2); box-shadow: inset 0 0 0 1px var(--accent-2); }
@@ -150,11 +157,11 @@ a { color: var(--accent); }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip { border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2); padding: 8px 12px; border-radius: 99px; font: 500 13px Inter, sans-serif; cursor: pointer; transition: transform .15s ease; }
 .chip:active { transform: scale(.93); }
-.chip.on { background: linear-gradient(135deg, var(--accent), var(--accent-2)); border-color: transparent; color: #04231a; font-weight: 700; }
+.chip.on { background: linear-gradient(135deg, var(--accent), var(--accent-2)); border-color: transparent; color: #fff; font-weight: 700; }
 .switch-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); gap: 12px; }
 .switch-row input { appearance: none; width: 44px; height: 26px; border-radius: 13px; background: var(--neutral); position: relative; cursor: pointer; flex: none; transition: background .15s; }
 .switch-row input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .15s; }
-.switch-row input:checked { background: var(--win); }
+.switch-row input:checked { background: var(--accent); }
 .switch-row input:checked::after { transform: translateX(18px); }
 .inp { width: 100%; background: var(--surface-2); border: 1px solid var(--border); color: var(--text); border-radius: 12px; padding: 12px; font: 14px Inter, sans-serif; margin-top: 8px; }
 .inp:focus { outline: none; border-color: var(--accent); }
@@ -180,9 +187,9 @@ a { color: var(--accent); }
 .tabs button { position: relative; background: none; border: 0; color: var(--muted); font: 500 11px Inter, sans-serif; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px 0; cursor: pointer; transition: color .2s ease; }
 .tabs button .ico { width: 20px; height: 20px; }
 .tabs button .ico svg { width: 100%; height: 100%; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform .2s ease; }
-.tabs button.active { color: var(--accent-2); }
+.tabs button.active { color: var(--text); }
 .tabs button.active .ico svg { transform: translateY(-2px) scale(1.08); }
-.tabs button.active::before { content: ""; position: absolute; top: -6px; left: 50%; transform: translateX(-50%); width: 16px; height: 3px; border-radius: 3px; background: linear-gradient(90deg, var(--violet), var(--accent-2)); }
+.tabs button.active::before { content: ""; position: absolute; top: -6px; left: 50%; transform: translateX(-50%); width: 16px; height: 3px; border-radius: 3px; background: var(--violet); }
 
 .sheet-bg { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 20; }
 .sheet { position: fixed; left: 0; right: 0; bottom: 0; max-height: 75vh; overflow-y: auto; background: var(--surface); border-radius: 20px 20px 0 0; padding: 10px 16px calc(20px + env(safe-area-inset-bottom)); z-index: 21; max-width: 560px; margin: 0 auto; animation: up .2s ease; }

@@ -2,7 +2,7 @@
 const tg = window.Telegram ? window.Telegram.WebApp : null;
 if (tg) {
   tg.ready(); tg.expand();
-  try { tg.setHeaderColor("#070b09"); tg.setBackgroundColor("#070b09"); } catch (e) {}
+  try { tg.setHeaderColor("#07080d"); tg.setBackgroundColor("#07080d"); } catch (e) {}
   try { tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch (e) {}   // не сворачивать приложение свайпом вниз
 }
 applyI18n();
