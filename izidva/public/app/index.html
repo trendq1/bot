@@ -8,7 +8,7 @@
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=8">
+  <link rel="stylesheet" href="styles.css?v=9">
 </head>
 <body>
   <div id="stars"></div>
@@ -32,11 +32,11 @@
           <div class="hint" id="statusDetail"></div>
         </div>
 
-        <div class="tiles">
-          <div class="tile"><div class="label" data-i18n="today">Сьогодні</div><div class="val num chip" id="kToday">—</div><div class="mini" id="kTodayN"></div></div>
-          <div class="tile"><div class="label" data-i18n="days7">7 днів</div><div class="val num chip" id="kWeek">—</div><div class="mini" id="kWeekN"></div></div>
-          <div class="tile"><div class="label" data-i18n="days30">30 днів</div><div class="val num chip" id="kMonth">—</div><div class="mini" id="kMonthN"></div></div>
-          <div class="tile"><div class="label" data-i18n="winrate30">Вінрейт 30д</div><div class="val num" id="kWin">—</div><div class="mini" data-i18n="winning_trades">прибуткових угод</div></div>
+        <div class="tiles tiles-list">
+          <div class="tile"><div class="label" data-i18n="today">Сьогодні</div><div class="tile-r"><div class="val num" id="kToday">—</div><div class="mini" id="kTodayN"></div></div></div>
+          <div class="tile"><div class="label" data-i18n="days7">7 днів</div><div class="tile-r"><div class="val num" id="kWeek">—</div><div class="mini" id="kWeekN"></div></div></div>
+          <div class="tile"><div class="label" data-i18n="days30">30 днів</div><div class="tile-r"><div class="val num" id="kMonth">—</div><div class="mini" id="kMonthN"></div></div></div>
+          <div class="tile"><div class="label" data-i18n="winrate30">Вінрейт 30д</div><div class="tile-r"><div class="val num" id="kWin">—</div><div class="mini" data-i18n="winning_trades">прибуткових угод</div></div></div>
         </div>
 
         <div class="card">
@@ -177,7 +177,7 @@
     <div class="toast" id="toast" hidden></div>
     <div class="tip" id="tip" hidden></div>
   </div>
-  <script src="i18n.js?v=8"></script>
-  <script src="app.js?v=8"></script>
+  <script src="i18n.js?v=9"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>

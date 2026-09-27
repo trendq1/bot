@@ -69,13 +69,21 @@ body::before {
 .hint { color: var(--muted); font-size: 12px; margin-top: 10px; min-height: 16px; }
 
 .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
-.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 12px;
-  backdrop-filter: blur(18px) saturate(160%); -webkit-backdrop-filter: blur(18px) saturate(160%); transition: transform .15s ease; }
+.tile { background: rgba(255,255,255,.04); border: 1px solid var(--border); border-radius: 14px; padding: 12px;
+  backdrop-filter: blur(22px) saturate(160%); -webkit-backdrop-filter: blur(22px) saturate(160%); transition: transform .15s ease; }
 .tile:active { transform: scale(.96); }
 .tile .val { font-size: 20px; font-weight: 600; margin-top: 4px; }
 .tile .mini { color: var(--muted); font-size: 12px; }
 .pos { color: var(--win); }
 .neg { color: var(--loss); }
+
+/* список замість сітки 2×2 — рядок: назва зліва, значення справа, просто прозоре скло без заливки суми */
+.tiles.tiles-list { display: flex; flex-direction: column; gap: 8px; }
+.tiles-list .tile { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; }
+.tiles-list .tile .label { margin-bottom: 0; }
+.tiles-list .tile-r { text-align: right; }
+.tiles-list .tile .val { margin-top: 0; }
+.tiles-list .tile .mini { margin-top: 2px; }
 
 .btn { width: 100%; border: 0; border-radius: 12px; padding: 13px 16px; font: 600 15px Inter, sans-serif; cursor: pointer; margin-top: 10px; transition: transform .15s ease, box-shadow .15s ease; }
 .btn:active { transform: scale(.97); }

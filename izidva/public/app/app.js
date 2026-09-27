@@ -117,7 +117,7 @@ async function loadHome() {
     const d = await api("/dashboard?tz=" + TZ);
     setNum($("todayPnl"), d.today.pnl, " $");
     [["kToday", d.today], ["kWeek", d.week], ["kMonth", d.month]].forEach(([id, p]) => {
-      setNum($(id), p.pnl); $(id + "N").textContent = t("n_trades", { n: p.trades });
+      setNum($(id), p.pnl, " $"); $(id + "N").textContent = t("n_trades", { n: p.trades });
     });
     $("kWin").textContent = d.month.trades ? d.month.winrate + "%" : "—";
     drawEquity(d.equity_curve);
