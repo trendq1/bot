@@ -30,6 +30,13 @@ const STRAT = () => ({ grid: t("grid_title"), trend: t("trend_title"), liquidati
 const REGIME = () => ({ trend_up: t("regime_trend_up"), trend_down: t("regime_trend_down"), range: t("regime_range"), high_volatility: t("regime_high_volatility") });
 
 // ───────────── утилиты ─────────────
+const COIN_COLORS = ["#f7931a", "#8ba4ff", "#14f195", "#7d92ff", "#22e6a0", "#fab219", "#8b5cf6", "#22c3e6"];
+function coinIcon(symbol) {
+  const base = String(symbol).replace(/USDT$/, "");
+  let h = 0; for (let i = 0; i < base.length; i++) h = (h * 31 + base.charCodeAt(i)) >>> 0;
+  const c = COIN_COLORS[h % COIN_COLORS.length];
+  return `<span class="coin-ic" style="background:${c}26;color:${c}">${esc(base.slice(0, 2))}</span>`;
+}
 async function api(path, opts = {}) {
   const res = await fetch("../api/index.php" + path, {
     ...opts,
@@ -92,8 +99,8 @@ $("toggleBtn").addEventListener("click", async () => {
 function renderLive(live) {
   const strat = STRAT();
   const rows = [];
-  (live?.grids || []).forEach((g) => rows.push(`<div class="row"><div class="l"><b>${esc(g.symbol)}</b><span class="tag">${g.mode === "long" ? t("grid_long") : t("grid_short")}</span><div class="muted">${t("grid_step_filled", { step: g.step_pct, filled: g.filled, levels: g.levels })}</div></div><div class="r muted">${t("grid_tag")}</div></div>`));
-  (live?.directional || []).forEach((d) => rows.push(`<div class="row"><div class="l"><b>${esc(d.symbol)}</b><span class="tag">${strat[d.strategy] || d.strategy}</span><div class="muted">${d.entry} · ${d.stop}</div></div><div class="r ${d.side === "Buy" ? "pos" : "neg"}">${d.side === "Buy" ? "LONG" : "SHORT"}</div></div>`));
+  (live?.grids || []).forEach((g) => rows.push(`<div class="row"><div class="l-wrap">${coinIcon(g.symbol)}<div class="l"><b>${esc(g.symbol)}</b><span class="tag">${g.mode === "long" ? t("grid_long") : t("grid_short")}</span><div class="muted">${t("grid_step_filled", { step: g.step_pct, filled: g.filled, levels: g.levels })}</div></div></div><div class="r muted chip">${t("grid_tag")}</div></div>`));
+  (live?.directional || []).forEach((d) => rows.push(`<div class="row"><div class="l-wrap">${coinIcon(d.symbol)}<div class="l"><b>${esc(d.symbol)}</b><span class="tag">${strat[d.strategy] || d.strategy}</span><div class="muted">${d.entry} · ${d.stop}</div></div></div><div class="r chip ${d.side === "Buy" ? "pos" : "neg"}">${d.side === "Buy" ? "LONG" : "SHORT"}</div></div>`));
   $("liveList").innerHTML = rows.join("") || `<div class="empty">${t("no_open_positions")}</div>`;
 }
 
@@ -257,9 +264,9 @@ $("sheetBg").addEventListener("click", () => { $("sheet").hidden = true; $("shee
 // ───────────── сделки ─────────────
 function tradeRow(row) {
   const strat = STRAT();
-  return `<div class="row"><div class="l"><b>${esc(row.symbol)}</b><span class="tag">${strat[row.strategy] || esc(row.strategy)}</span>
-    <div class="muted">${row.date ? esc(row.date) + " " : ""}${esc(row.time)} · ${row.side === "Buy" ? t("long") : t("short")} ${row.entry} → ${row.exit}</div></div>
-    <div class="r num ${cls(row.pnl)}">${money(row.pnl)}</div></div>`;
+  return `<div class="row"><div class="l-wrap">${coinIcon(row.symbol)}<div class="l"><b>${esc(row.symbol)}</b><span class="tag">${strat[row.strategy] || esc(row.strategy)}</span>
+    <div class="muted">${row.date ? esc(row.date) + " " : ""}${esc(row.time)} · ${row.side === "Buy" ? t("long") : t("short")} ${row.entry} → ${row.exit}</div></div></div>
+    <div class="r num chip ${cls(row.pnl)}">${money(row.pnl)}</div></div>`;
 }
 async function loadTrades() {
   try {
@@ -343,8 +350,8 @@ async function loadAI() {
     $("aiNote").textContent = r.ai_enabled ? t("ai_note_default") : t("ai_no_key");
     const regime = REGIME();
     $("marketList").innerHTML = r.market.map((m) => `<div class="card market">
-      <div class="card-h"><div><b>${esc(m.symbol)}</b> <span class="muted small num">${m.price ?? ""}</span>
-        ${m.change_24h != null ? `<span class="small num ${cls(m.change_24h)}">${m.change_24h > 0 ? "+" : ""}${m.change_24h}%</span>` : ""}</div>
+      <div class="card-h"><div class="l-wrap">${coinIcon(m.symbol)}<div><b>${esc(m.symbol)}</b> <span class="muted small num">${m.price ?? ""}</span>
+        ${m.change_24h != null ? `<span class="small num chip ${cls(m.change_24h)}">${m.change_24h > 0 ? "+" : ""}${m.change_24h}%</span>` : ""}</div></div>
         <span class="regime ${esc(m.regime)}">${regime[m.regime] || esc(m.regime)}</span></div>
       <div class="small">${esc(m.summary)}</div>
       <div class="weights">${[[t("grid_title"), m.w_grid], [t("trend_title"), m.w_trend], [t("liquidation_title"), m.w_liquidation]].map(([n, v]) =>

@@ -103,10 +103,22 @@ body::after { width: 240px; height: 240px; background: rgba(124,58,237,.18); top
 
 .list .row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); gap: 10px; transition: background .15s ease; }
 .list .row:last-child { border-bottom: 0; }
+.l-wrap { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.row .l { min-width: 0; }
 .row .l b { font-weight: 600; }
 .row .l .muted { font-size: 12px; }
-.row .r { text-align: right; font-weight: 600; }
+.row .r { text-align: right; font-weight: 600; flex-shrink: 0; }
 .tag { display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 6px; background: var(--surface-2); color: var(--text-2); margin-left: 6px; font-weight: 500; }
+
+/* кольорові кружки-іконки монет: перші літери base-символу на кольоровому тлі */
+.coin-ic { flex-shrink: 0; width: 32px; height: 32px; border-radius: 10px; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; text-transform: uppercase; }
+
+/* пілюлі-бейджі для сум прибутку/збитку та статусів у списках — замість простого кольорового тексту */
+.chip { display: inline-block; padding: 3px 10px; border-radius: 20px; }
+.chip.pos { background: rgba(34,230,160,.15); color: var(--win); }
+.chip.neg { background: rgba(239,83,80,.15); color: var(--loss); }
+.row .r.chip.muted { background: var(--surface-2); color: var(--text-2); font-weight: 600; font-size: 12px; }
 
 .cal-nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .cal-title { font-weight: 600; font-size: 17px; text-transform: capitalize; }
