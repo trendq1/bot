@@ -21,6 +21,7 @@ use App\Crypto;
 use App\DB;
 use App\Engine\AIAnalyst;
 use App\Engine\Brain;
+use App\Engine\ChartRenderer;
 use App\Engine\Grid;
 use App\Engine\Indicators;
 use App\Engine\Instrument;
@@ -185,6 +186,14 @@ function klines(int $n = 300, float $drift = 0.0): array
     }
     return $out;
 }
+test('рендер свечного графика в PNG', function () {
+    $candles = array_map(fn($k) => ['open' => $k[1], 'high' => $k[2], 'low' => $k[3], 'close' => $k[4]], klines(60, 0.001));
+    $png = ChartRenderer::candlesPng($candles, 'BTCUSDT');
+    check(str_starts_with($png, "\x89PNG"), 'валидный PNG');
+    $info = getimagesizefromstring($png);
+    check($info !== false && $info[0] === 900 && $info[1] === 480, 'ожидаемый размер холста');
+    check(ChartRenderer::candlesPng([]) !== '', 'без свечей — не падает, а рисует заглушку');
+});
 test('признаки и режим', function () {
     $f = Indicators::features(klines(300, 0.002));
     check($f !== null && $f['ema50'] > $f['ema200'], 'тренд вверх');
@@ -248,7 +257,7 @@ test('миграции на пустую базу и повторно', function
     $applied = Migrator::run($pdo);
     check(count($applied) === count(Migrator::files()), 'все миграции');
     check(Migrator::run($pdo) === [], 'повторный запуск ничего не делает');
-    check((int)DB::val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()") === 22, '22 таблицы');
+    check((int)DB::val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()") === 23, '23 таблицы');
 });
 test('настройки: секреты шифруются', function () {
     Settings::save(['anthropic_api_key' => 'sk-ant-1234', 'ai_interval_min' => '15', 'symbols' => 'btcusdt, ethusdt', 'require_referral' => 'false']);
@@ -283,6 +292,28 @@ test('запрос к Claude и разбор ответа', function () {
         check(($req['body']['fallbacks'] ?? null) === 'default' && str_contains((string)$req['beta'], 'server-side-fallback'), 'резервная модель');
         check(($req['body']['output_config']['format']['type'] ?? '') === 'json_schema', 'структурированный ответ');
         check((float)DB::val("SELECT cost_usd FROM ai_usage ORDER BY id DESC LIMIT 1") > 0, 'стоимость записана');
+    } finally {
+        putenv('ANTHROPIC_BASE_URL');
+        Settings::save(['anthropic_api_key' => '']);
+        proc_terminate($proc);
+    }
+});
+test('vision-разбор графика: отдельный вызов, без ключа возвращает null', function () {
+    check((new AIAnalyst())->visionReview('BTCUSDT', ChartRenderer::candlesPng([['open' => 1, 'high' => 2, 'low' => 0.5, 'close' => 1.5]])) === null,
+        'без ключа Anthropic — null, а не ошибка');
+});
+test('vision-разбор графика через заглушку API', function () {
+    $port = 18978;
+    $proc = proc_open([PHP_BINARY, '-S', "127.0.0.1:$port", __DIR__ . '/fake_anthropic.php'], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+    usleep(400_000);
+    putenv("ANTHROPIC_BASE_URL=http://127.0.0.1:$port");
+    try {
+        Settings::save(['anthropic_api_key' => 'sk-ant-test', 'ai_model' => 'claude-opus-5']);
+        $png = ChartRenderer::candlesPng(array_map(fn($k) => ['open' => $k[1], 'high' => $k[2], 'low' => $k[3], 'close' => $k[4]], klines(40)), 'BTCUSDT');
+        $note = (new AIAnalyst())->visionReview('BTCUSDT', $png);
+        check(is_array($note) && in_array($note['bias'], ['bullish', 'bearish', 'neutral'], true), 'ответ разобран без падения');
+        check($note['summary'] !== '', 'краткое описание не пустое');
+        check((string)DB::val("SELECT kind FROM ai_usage ORDER BY id DESC LIMIT 1") === 'vision', 'расход учтён отдельным видом "vision"');
     } finally {
         putenv('ANTHROPIC_BASE_URL');
         Settings::save(['anthropic_api_key' => '']);

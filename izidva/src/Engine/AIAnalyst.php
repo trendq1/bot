@@ -54,6 +54,17 @@ final class AIAnalyst
 - summary — 1–2 предложения по-русски для клиента: что происходит на рынке и что делает бот.
 TXT;
 
+    private const VISION_SYSTEM = <<<TXT
+Ты смотришь на свечной график одной монеты (фьючерсы Bybit) как трейдер — глазами, а не по формулам.
+Это дополнительный, необязательный источник мнения для бота: он не меняет автоматические сделки напрямую,
+только показывается человеку как справочная заметка. Поэтому будь честен и краток, не выдумывай точность,
+которой не видно на картинке.
+Опиши визуальную структуру: явные уровни поддержки/сопротивления, фигуры (флаг, треугольник, двойная
+вершина/дно, канал), где сейчас цена относительно них. bias — твоё общее впечатление по картинке
+(bullish/bearish/neutral). key_level — ближайший значимый уровень цены на графике, если он есть, иначе null.
+summary — 1–2 предложения по-русски, простым языком, для трейдера-человека.
+TXT;
+
     private const REVIEW_SYSTEM = <<<TXT
 Ты разбираешь итоги торгового дня автоматического бота на фьючерсах Bybit.
 На входе — агрегированная статистика закрытых сделок по монетам, стратегиям и режимам рынка, а также текущие уроки.
@@ -277,5 +288,75 @@ TXT;
     {
         return $this->jsonCall(self::REVIEW_SYSTEM, self::reviewSchema(),
             ['stats' => $stats, 'current_lessons' => array_slice($lessons, -10)], 16000, 'review');
+    }
+
+    private static function visionSchema(): array
+    {
+        return [
+            'type' => 'object',
+            'properties' => [
+                'bias' => ['type' => 'string', 'enum' => ['bullish', 'bearish', 'neutral']],
+                'key_level' => ['type' => ['number', 'null']],
+                'summary' => ['type' => 'string'],
+            ],
+            'required' => ['bias', 'key_level', 'summary'],
+            'additionalProperties' => false,
+        ];
+    }
+
+    /**
+     * Необязательный vision-разбор графика по картинке — отдельно от основного цикла анализа (analyze()),
+     * на своём, более редком расписании. Результат ни на что не влияет автоматически, только справочная
+     * заметка для человека (не меняет веса стратегий и не может обойти лимиты риска).
+     * @return ?array{bias:string,key_level:?float,summary:string}
+     */
+    public function visionReview(string $symbol, string $pngBytes): ?array
+    {
+        $client = $this->client();
+        if ($client === null) {
+            return null;
+        }
+        $model = (string)Settings::get('ai_model');
+        $args = [
+            'maxTokens' => 1000,
+            'model' => $model,
+            'system' => [['type' => 'text', 'text' => self::VISION_SYSTEM, 'cacheControl' => ['type' => 'ephemeral']]],
+            'outputConfig' => ['format' => ['type' => 'json_schema', 'schema' => self::visionSchema()]],
+            'messages' => [['role' => 'user', 'content' => [
+                ['type' => 'text', 'text' => "Монета: $symbol. Свечи 5м, самая правая — последняя (текущая цена)."],
+                ['type' => 'image', 'source' => ['type' => 'base64', 'media_type' => 'image/png', 'data' => base64_encode($pngBytes)]],
+            ]]],
+        ];
+        try {
+            $msg = $client->beta->messages->create(...$args);
+        } catch (RateLimitException) {
+            Log::warn('Claude vision: лимит запросов');
+            return null;
+        } catch (APIStatusException $e) {
+            Log::warn('Claude vision: ошибка API ' . $e->getMessage());
+            return null;
+        } catch (APIConnectionException) {
+            Log::warn('Claude vision: нет соединения');
+            return null;
+        }
+        $this->logUsage('vision', $msg->model ?: $model, $msg->usage);
+        if (in_array($msg->stopReason, ['refusal', 'max_tokens'], true)) {
+            Log::warn("Claude vision: ответ не получен ({$msg->stopReason})");
+            return null;
+        }
+        foreach ($msg->content as $block) {
+            if ($block->type === 'text') {
+                $data = json_decode($block->text, true);
+                if (!is_array($data)) {
+                    return null;
+                }
+                return [
+                    'bias' => in_array($data['bias'] ?? '', ['bullish', 'bearish', 'neutral'], true) ? $data['bias'] : 'neutral',
+                    'key_level' => is_numeric($data['key_level'] ?? null) ? (float)$data['key_level'] : null,
+                    'summary' => mb_substr((string)($data['summary'] ?? ''), 0, 300),
+                ];
+            }
+        }
+        return null;
     }
 }

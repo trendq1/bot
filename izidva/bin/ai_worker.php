@@ -8,8 +8,10 @@ declare(strict_types=1);
 
 require __DIR__ . '/../src/bootstrap.php';
 
+use App\Bybit;
 use App\DB;
 use App\Engine\AIAnalyst;
+use App\Engine\ChartRenderer;
 use App\Engine\Learner;
 use App\Log;
 use App\Settings;
@@ -23,6 +25,7 @@ $ai = new AIAnalyst();
 $learner = new Learner();
 $lastLearnerLoad = 0;
 $lastRun = [];
+$lastVisionRun = [];
 
 while (true) {
     try {
@@ -55,6 +58,7 @@ while (true) {
                 }
             }
             dailyReview($ai);
+            visionPass($ai, $settings, $lastVisionRun);     // отдельное, более редкое расписание — основной цикл выше не трогает
         }
     } catch (Throwable $e) {
         Log::error('ИИ: ' . $e->getMessage());
@@ -106,4 +110,44 @@ function dailyReview(AIAnalyst $ai): void
                ON DUPLICATE KEY UPDATE params = VALUES(params), updated_at = VALUES(updated_at)', [$t['symbol'], json_encode($new), DB::now()]);
     }
     Log::info('ИИ: разбор дня выполнен, уроков: ' . count($result['lessons'] ?? []));
+}
+
+/**
+ * Необязательный vision-разбор графика: по картинке свечей раз в vision_interval_min на монету,
+ * не чаще одной монеты за такт — чтобы не разгонять расходы. Результат — справочная заметка
+ * в vision_notes, автоматические сделки она не трогает.
+ */
+function visionPass(AIAnalyst $ai, array $settings, array &$lastVisionRun): void
+{
+    if (empty($settings['vision_enabled'])) {
+        return;
+    }
+    $interval = max(15, (int)$settings['vision_interval_min']) * 60;
+    foreach (Settings::get('symbols') as $sym) {
+        if (time() - ($lastVisionRun[$sym] ?? 0) < $interval) {
+            continue;
+        }
+        $lastVisionRun[$sym] = time();
+        try {
+            $r = (new Bybit())->get('/v5/market/kline', ['category' => 'linear', 'symbol' => $sym, 'interval' => '5', 'limit' => 120]);
+        } catch (Throwable $e) {
+            Log::warn("vision $sym: свечи не загрузились: " . $e->getMessage());
+            return;
+        }
+        $candles = [];
+        foreach (array_reverse($r['list'] ?? []) as $k) {
+            $candles[] = ['open' => (float)$k[1], 'high' => (float)$k[2], 'low' => (float)$k[3], 'close' => (float)$k[4]];
+        }
+        if (count($candles) < 20) {
+            return;
+        }
+        $note = $ai->visionReview($sym, ChartRenderer::candlesPng($candles, $sym));
+        if ($note === null) {
+            return;
+        }
+        DB::q('INSERT INTO vision_notes (symbol, ts, bias, key_level, summary) VALUES (?, ?, ?, ?, ?)
+               ON DUPLICATE KEY UPDATE ts = VALUES(ts), bias = VALUES(bias), key_level = VALUES(key_level), summary = VALUES(summary)',
+            [$sym, DB::now(), $note['bias'], $note['key_level'], $note['summary']]);
+        return;
+    }
 }

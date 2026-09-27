@@ -241,11 +241,15 @@ final class MiniApi
     public static function marketView(): array
     {
         $state = json_decode((string)DB::val('SELECT state FROM engine_status WHERE id = 1'), true) ?: [];
+        $vision = [];
+        foreach (DB::all('SELECT symbol, bias, key_level, summary FROM vision_notes') as $v) {
+            $vision[$v['symbol']] = ['bias' => $v['bias'], 'key_level' => $v['key_level'] !== null ? (float)$v['key_level'] : null, 'summary' => $v['summary']];
+        }
         $out = [];
         foreach ($state['symbols'] ?? [] as $sym => $s) {
             if (!empty($s['insight']) && !empty($s['features'])) {
                 $out[] = ['symbol' => $sym, 'price' => $s['price'] ?? $s['features']['price']] + $s['insight']
-                    + ['change_24h' => round((float)$s['features']['ret_24h'], 2)];
+                    + ['change_24h' => round((float)$s['features']['ret_24h'], 2), 'vision' => $vision[$sym] ?? null];
             }
         }
         return $out;

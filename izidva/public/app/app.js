@@ -363,6 +363,9 @@ async function loadAI() {
       <div class="weights">${[[t("grid_title"), m.w_grid], [t("trend_title"), m.w_trend], [t("liquidation_title"), m.w_liquidation]].map(([n, v]) =>
         `<span>${n}</span><span class="wbar"><i style="width:${Math.round((v || 0) * 100)}%"></i></span><span class="num">${Math.round((v || 0) * 100)}</span>`).join("")}</div>
       <div class="muted small" style="margin-top:8px">${t("grid_word")}: ${m.grid_mode === "off" ? t("grid_state_off") : m.grid_mode === "long" ? t("grid_state_long") : t("grid_state_short")} · ${t("risk_word")} ×${Number(m.risk_mult).toFixed(2)} · ${m.source === "ai" ? t("ai_source") : t("algo_source")}</div>
+      ${m.vision ? `<div class="small" style="margin-top:8px; padding-top:8px; border-top:1px solid var(--border)">
+        <b>👁 ${t("vision_title")}</b> <span class="regime ${m.vision.bias === "bullish" ? "trend_up" : m.vision.bias === "bearish" ? "trend_down" : "range"}">${t("vision_" + m.vision.bias)}</span>
+        <div class="muted" style="margin-top:4px">${esc(m.vision.summary)}</div></div>` : ""}
     </div>`).join("") || `<div class="card empty">${t("market_loading")}</div>`;
     $("lessons").innerHTML = r.lessons.map((l) => `<li>${esc(l)}</li>`).join("") || `<li class="muted">${t("lessons_placeholder")}</li>`;
   } catch (e) { toast(e.message); }

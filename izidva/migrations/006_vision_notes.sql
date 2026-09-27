@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS vision_notes (
+	symbol VARCHAR(24) NOT NULL,
+	ts DATETIME NOT NULL,
+	bias VARCHAR(16) NOT NULL,
+	key_level DOUBLE NULL,
+	summary VARCHAR(400) NOT NULL,
+	PRIMARY KEY (symbol)
+)ENGINE=InnoDB CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;
