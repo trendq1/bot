@@ -10,6 +10,8 @@ final class RiskGuard
     public float $dayStartEquity = 0.0;
     public int $consecLosses = 0;
     public float $pausedUntil = 0.0;
+    /** Сколько направленных сделок (тренд/ликвидации) открыто сегодня — сетку не считаем, у неё свой лимит убытка. */
+    public int $dayDirectionalTrades = 0;
 
     public function __construct(private array $prof) {}
 
@@ -19,7 +21,18 @@ final class RiskGuard
         if ($today !== $this->day) {
             $this->day = $today;
             $this->dayStartEquity = $equity;
+            $this->dayDirectionalTrades = 0;
         }
+    }
+
+    public function directionalTradesLeft(): int
+    {
+        return max(0, (int)($this->prof['max_directional_trades_per_day'] ?? 999) - $this->dayDirectionalTrades);
+    }
+
+    public function recordDirectionalTrade(): void
+    {
+        $this->dayDirectionalTrades++;
     }
 
     public function dayPnlPct(float $equity): float

@@ -17,6 +17,8 @@ interface ExchangeInterface
     public function placeLimit(string $symbol, string $side, string $qty, string $price, string $linkId, bool $reduceOnly = false,
                                ?string $stop = null, ?string $take = null): void;
     public function placeMarket(string $symbol, string $side, string $qty, ?string $stop = null, ?string $take = null, bool $reduceOnly = false): void;
+    /** Подвинуть стоп уже открытой позиции (трейлинг-стоп), не трогая тейк. */
+    public function setStopLoss(string $symbol, string $stop): void;
     public function cancel(string $symbol, string $linkId): void;
     public function cancelAll(string $symbol): void;
     /** @return string[] */

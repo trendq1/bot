@@ -141,6 +141,13 @@ final class PaperExchange implements ExchangeInterface
         }
     }
 
+    public function setStopLoss(string $symbol, string $stop): void
+    {
+        if (isset($this->pos[$symbol])) {
+            $this->pos[$symbol]['stop'] = (float)$stop;
+        }
+    }
+
     public function cancel(string $symbol, string $linkId): void
     {
         if (isset($this->orders[$symbol][$linkId])) {

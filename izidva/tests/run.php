@@ -513,6 +513,129 @@ test('ручной режим: автостратегии не открываю�
     $w->step(microtime(true));
     check(!isset($w->grids['BTCUSDT']), 'сетка не запускается, пока клиент переведён в ручной режим');
 });
+test('частичный тейк на +1R и трейлинг-стоп в безубыток', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 100000.0;
+    $brain = new Brain(new Learner());
+    $brain->features['BTCUSDT'] = ['price' => 100000.0, 'atr' => 500.0, 'ema20' => 100000, 'ema20_1' => 100000, 'last_closed_ts' => 1.0, 'vwap_4h' => 100000];
+    $brain->insights['BTCUSDT'] = ['regime' => 'trend_up', 'confidence' => 0.8, 'w_grid' => 0.1, 'w_trend' => 1.0, 'w_liquidation' => 0.1,
+        'grid_mode' => 'off', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 100000.0]);
+    $ex->placeMarket('BTCUSDT', 'Buy', '0.02');
+    $w = new Worker(790, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->directional['BTCUSDT'] = ['strategy' => 'trend', 'side' => 'Buy', 'entry' => 100000.0, 'stop' => 99000.0, 'qty' => 0.02,
+        'regime' => 'trend_up', 'opened_ms' => (int)(microtime(true) * 1000) - 120_000, 'risk_usd' => 1000.0 * 0.02];
+    $market->feeds['BTCUSDT']->price = 101100.0;                // +1.1R от входа (риск = 1000 на единицу объёма)
+    $ex->updatePrices(['BTCUSDT' => 101100.0]);
+    $w->step(microtime(true));
+    check(($w->directional['BTCUSDT']['partial_done'] ?? false) === true, 'зафиксирована частичная прибыль на +1R');
+    check(near(abs($ex->positions()['BTCUSDT']['qty']), 0.01, 1e-6), 'осталась половина объёма');
+    check($w->directional['BTCUSDT']['stop'] > 100000.0, 'стоп передвинут минимум в безубыток (профит уже больше 0.8R)');
+});
+test('трейлинг-стоп следует за ценой на +1.5R, не расширяя риск', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 100000.0;
+    $brain = new Brain(new Learner());
+    $brain->features['BTCUSDT'] = ['price' => 100000.0, 'atr' => 500.0, 'ema20' => 100000, 'ema20_1' => 100000, 'last_closed_ts' => 1.0, 'vwap_4h' => 100000];
+    $brain->insights['BTCUSDT'] = ['regime' => 'trend_up', 'confidence' => 0.8, 'w_grid' => 0.1, 'w_trend' => 1.0, 'w_liquidation' => 0.1,
+        'grid_mode' => 'off', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 100000.0]);
+    $ex->placeMarket('BTCUSDT', 'Buy', '0.02');
+    $w = new Worker(791, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->directional['BTCUSDT'] = ['strategy' => 'trend', 'side' => 'Buy', 'entry' => 100000.0, 'stop' => 99000.0, 'qty' => 0.02,
+        'regime' => 'trend_up', 'opened_ms' => (int)(microtime(true) * 1000) - 120_000, 'risk_usd' => 1000.0 * 0.02,
+        'partial_done' => true, 'trail_be' => true];               // частичный тейк и безубыток уже отработали раньше
+    $market->feeds['BTCUSDT']->price = 103000.0;                // +3R — трейлинг на расстоянии 0.6R = 600
+    $ex->updatePrices(['BTCUSDT' => 103000.0]);
+    $w->step(microtime(true));
+    check(near((float)$w->directional['BTCUSDT']['stop'], 102400.0, 0.5), 'стоп подтянут на 0.6R за ценой');
+    $oldStop = $w->directional['BTCUSDT']['stop'];
+    $market->feeds['BTCUSDT']->price = 102500.0;                // небольшой откат (стоп 102400 ещё не задет) — стоп назад не двигаем
+    $ex->updatePrices(['BTCUSDT' => 102500.0]);
+    $w->step(microtime(true));
+    check(near((float)$w->directional['BTCUSDT']['stop'], $oldStop, 1e-6), 'при откате цены стоп не отодвигается назад');
+});
+test('коррелирующие монеты: вторую направленную ставку в той же группе не берём', function () use ($BTC) {
+    $eth = new Instrument('ETHUSDT', '0.01', '0.01', 0.01, 500, 5, 50);
+    $market = new Market(['BTCUSDT', 'ETHUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->instruments['ETHUSDT'] = $eth;
+    $market->feeds['BTCUSDT']->price = 100000.0;
+    $market->feeds['ETHUSDT']->price = 101.0;
+    $brain = new Brain(new Learner());
+    $f = ['atr' => 1.0, 'price' => 101.0, 'ema20' => 100.5, 'ema20_1' => 100.4, 'low_5' => 100.3, 'c1' => 100.9, 'o1' => 100.5,
+        'h2' => 100.8, 'l2' => 100.0, 'rsi' => 58, 'low_10' => 99.5, 'high_10' => 102, 'high_5' => 101.5,
+        'last_closed_ts' => 1.0, 'vwap_4h' => 100.5];
+    $brain->features['ETHUSDT'] = $f;
+    $brain->insights['ETHUSDT'] = ['regime' => 'trend_up', 'confidence' => 0.8, 'w_grid' => 0.0, 'w_trend' => 1.0, 'w_liquidation' => 0.0,
+        'grid_mode' => 'off', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 100000.0, 'ETHUSDT' => 101.0]);
+    $ex->placeMarket('BTCUSDT', 'Buy', '0.01');                  // реальная позиция на бирже — иначе checkDirectional её сразу «закроет»
+    $w = new Worker(792, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT', 'ETHUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->directional['BTCUSDT'] = ['strategy' => 'trend', 'side' => 'Buy', 'entry' => 100000.0, 'stop' => 99000.0, 'qty' => 0.01,
+        'regime' => 'trend_up', 'opened_ms' => (int)(microtime(true) * 1000) - 120_000, 'risk_usd' => 10.0];
+    $w->step(gmmktime(12, 0, 0));                                // день, чтобы «тихие часы» не мешали проверить именно корреляцию
+    check(!isset($w->directional['ETHUSDT']), 'сделка по ETHUSDT не открыта — BTCUSDT из той же группы уже в позиции');
+});
+test('тихие часы (00:00–05:00 UTC): новых направленных сделок не берём', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 101.0;
+    $brain = new Brain(new Learner());
+    $f = ['atr' => 1.0, 'price' => 101.0, 'ema20' => 100.5, 'ema20_1' => 100.4, 'low_5' => 100.3, 'c1' => 100.9, 'o1' => 100.5,
+        'h2' => 100.8, 'l2' => 100.0, 'rsi' => 58, 'low_10' => 99.5, 'high_10' => 102, 'high_5' => 101.5,
+        'last_closed_ts' => 1.0, 'vwap_4h' => 100.5];
+    $brain->features['BTCUSDT'] = $f;
+    $brain->insights['BTCUSDT'] = ['regime' => 'trend_up', 'confidence' => 0.8, 'w_grid' => 0.0, 'w_trend' => 1.0, 'w_liquidation' => 0.0,
+        'grid_mode' => 'off', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 101.0]);
+    $w = new Worker(793, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->step(gmmktime(2, 0, 0));                                 // 02:00 UTC — тихая ночь
+    check(!isset($w->directional['BTCUSDT']), 'ночью новую ставку не открываем');
+    $w->step(gmmktime(12, 0, 0));                                // днём тот же сетап уже проходит
+    check(isset($w->directional['BTCUSDT']), 'днём тот же сетап уже открывает сделку');
+});
+test('мёртвая волатильность (ATR/цена < 0.07%): новых направленных сделок не берём', function () use ($BTC) {
+    $offset = 1_000_000.0;                                       // сдвигаем весь ценовой ряд, оставляя дельты в единицах ATR прежними
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 101.0 + $offset;
+    $brain = new Brain(new Learner());
+    $f = ['atr' => 1.0, 'price' => 101.0 + $offset, 'ema20' => 100.5 + $offset, 'ema20_1' => 100.4 + $offset, 'low_5' => 100.3 + $offset,
+        'c1' => 100.9 + $offset, 'o1' => 100.5 + $offset, 'h2' => 100.8 + $offset, 'l2' => 100.0 + $offset, 'rsi' => 58,
+        'low_10' => 99.5 + $offset, 'high_10' => 102 + $offset, 'high_5' => 101.5 + $offset, 'last_closed_ts' => 1.0, 'vwap_4h' => 100.5 + $offset];
+    $brain->features['BTCUSDT'] = $f;
+    $brain->insights['BTCUSDT'] = ['regime' => 'trend_up', 'confidence' => 0.8, 'w_grid' => 0.0, 'w_trend' => 1.0, 'w_liquidation' => 0.0,
+        'grid_mode' => 'off', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => $f['price']]);
+    $w = new Worker(794, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->step(gmmktime(12, 0, 0));
+    check(!isset($w->directional['BTCUSDT']), 'ATR/цена ничтожно мал — рынок «спит», сделку не открываем');
+});
+test('дневной лимит числа направленных сделок', function () {
+    $guard = new RiskGuard(Risk::profile('conservative'));       // max_directional_trades_per_day = 4
+    $guard->updateEquity(1000.0);
+    check($guard->directionalTradesLeft() === 4, 'изначально доступны все 4 сделки');
+    for ($i = 0; $i < 4; $i++) {
+        $guard->recordDirectionalTrade();
+    }
+    check($guard->directionalTradesLeft() === 0, 'после 4 сделок лимит исчерпан');
+    $guard->day = gmdate('Y-m-d', strtotime('-1 day'));           // «вчера» — новый день сбросит счётчик
+    $guard->updateEquity(1000.0);
+    check($guard->directionalTradesLeft() === 4, 'на следующий день лимит обнуляется');
+});
 test('досрочный выход из тренда при развороте, не дожидаясь стопа', function () use ($BTC) {
     $market = new Market(['BTCUSDT']);
     $market->instruments['BTCUSDT'] = $BTC;

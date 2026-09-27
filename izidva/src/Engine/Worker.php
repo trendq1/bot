@@ -15,6 +15,16 @@ final class Worker
 {
     public const MAX_HOLD_SEC = 3 * 3600;
     public const LIQ_COOLDOWN_SEC = 20 * 60;
+    /** Монеты, которые обычно двигаются вместе — не берём вторую направленную ставку в той же группе одновременно. */
+    public const CORRELATION_GROUPS = [
+        ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'AVAXUSDT'],
+        ['XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'LTCUSDT'],
+    ];
+    /** С какой прибыли (в R) переносим стоп в безубыток / начинаем трейлить, и на каком расстоянии (тоже в R). */
+    private const TRAIL_BREAKEVEN_R = 0.8;
+    private const TRAIL_START_R = 1.5;
+    private const TRAIL_DISTANCE_R = 0.6;
+    private const PARTIAL_TAKE_R = 1.0;
 
     public RiskGuard $guard;
     /** @var array<string,Grid> */
@@ -105,7 +115,11 @@ final class Worker
             $this->ex->setLeverage($sym, (int)min($this->prof['leverage'], $inst->maxLeverage));
             $this->leverageSet[$sym] = true;
         }
-        $this->checkReversal($sym, $ins, $positions);
+        if ($this->checkReversal($sym, $ins, $positions)) {
+            return;                                          // позицию только что закрыли по развороту — на этом такте всё
+        }
+        $this->applyPartialTake($sym, $feed->price);
+        $this->applyTrailing($sym, $feed->price);
         $w = $this->weights($sym, $ins);
         $tuning = $this->brain->tuning[$sym] ?? [];
 
@@ -136,6 +150,15 @@ final class Worker
         }
         if (count($this->directional) >= $this->prof['max_directional']) {
             return;
+        }
+        if ($this->guard->directionalTradesLeft() <= 0) {
+            return;                                          // дневной лимит числа направленных сделок исчерпан
+        }
+        if ($this->correlatedDirectionalOpen($sym)) {
+            return;                                          // по коррелирующей монете уже есть направленная ставка
+        }
+        if ($this->quietHours($now) || $this->quietMarket($f)) {
+            return;                                          // тихие часы или мёртвая волатильность — новых ставок не берём
         }
         $setup = null;
         if ($w['trend'] >= 0.5 && ($this->lastTrendBar[$sym] ?? null) !== $f['last_closed_ts']) {
@@ -180,21 +203,22 @@ final class Worker
     /**
      * Досрочный выход из направленной сделки (тренд/ликвидации), если рынок развернулся против позиции —
      * не ждём полного стопа или тейка. Не трогает ручные сделки трейдера и сетки (у них своя логика выхода).
+     * @return bool true — позицию закрыли (или попытались), дальше на этом такте по монете делать нечего.
      */
-    private function checkReversal(string $sym, array $ins, array $positions): void
+    private function checkReversal(string $sym, array $ins, array $positions): bool
     {
         $d = $this->directional[$sym] ?? null;
         if (!$d || $d['strategy'] === 'manual' || !isset($positions[$sym])) {
-            return;
+            return false;
         }
         $nowMs = (int)(microtime(true) * 1000);
         if ($nowMs - $d['opened_ms'] < 60_000) {
-            return;                                          // не дёргаемся в первую минуту после входа
+            return false;                                     // не дёргаемся в первую минуту после входа
         }
         $long = $d['side'] === 'Buy';
         $reversed = $long ? $ins['regime'] === 'trend_down' : $ins['regime'] === 'trend_up';
         if (!$reversed) {
-            return;
+            return false;
         }
         try {
             $this->ex->closePosition($sym);                 // закрытие увидит checkDirectional на следующем такте и запишет сделку
@@ -202,6 +226,103 @@ final class Worker
         } catch (\Throwable $e) {
             Log::error("user {$this->userId}: не удалось закрыть $sym при развороте: " . $e->getMessage());
         }
+        return true;
+    }
+
+    /** Половина позиции фиксируется на +1R, остаток ведём дальше (трейлингом) — снижает разброс результата. */
+    private function applyPartialTake(string $sym, float $price): void
+    {
+        $d = $this->directional[$sym] ?? null;
+        $inst = $this->market->instruments[$sym] ?? null;
+        if (!$d || !$inst || $d['strategy'] === 'manual' || !$price || ($d['partial_done'] ?? false) || $d['risk_usd'] <= 0) {
+            return;
+        }
+        $riskDist = $d['risk_usd'] / $d['qty'];
+        if ($riskDist <= 0) {
+            return;
+        }
+        $long = $d['side'] === 'Buy';
+        $profitR = $long ? ($price - $d['entry']) / $riskDist : ($d['entry'] - $price) / $riskDist;
+        if ($profitR < self::PARTIAL_TAKE_R) {
+            return;
+        }
+        $half = $inst->roundQty($d['qty'] / 2);
+        if ((float)$half <= 0 || !$inst->qtyOk($half, $price)) {
+            return;                                          // остаток слишком мал, чтобы делить — ведём как есть
+        }
+        try {
+            $this->ex->placeMarket($sym, $long ? 'Sell' : 'Buy', $half, null, null, true);
+            $this->directional[$sym]['partial_done'] = true;
+            ($this->notify)($this->userId, "💰 $sym: зафиксирована часть прибыли на +" . self::PARTIAL_TAKE_R . 'R, остаток ведём трейлинг-стопом');
+        } catch (\Throwable $e) {
+            Log::error("user {$this->userId}: не удалось частично закрыть $sym: " . $e->getMessage());
+        }
+    }
+
+    /** Трейлинг-стоп: в безубыток на +0.8R, дальше следом за ценой на расстоянии 0.6R с +1.5R — чтобы не отдавать набежавшую прибыль. */
+    private function applyTrailing(string $sym, float $price): void
+    {
+        $d = $this->directional[$sym] ?? null;
+        $inst = $this->market->instruments[$sym] ?? null;
+        if (!$d || !$inst || $d['strategy'] === 'manual' || !$price || $d['risk_usd'] <= 0 || (float)$d['stop'] <= 0) {
+            return;
+        }
+        $riskDist = $d['risk_usd'] / $d['qty'];
+        if ($riskDist <= 0) {
+            return;
+        }
+        $long = $d['side'] === 'Buy';
+        $profitR = $long ? ($price - $d['entry']) / $riskDist : ($d['entry'] - $price) / $riskDist;
+        $target = null;
+        if ($profitR >= self::TRAIL_START_R) {
+            $target = $long ? $price - self::TRAIL_DISTANCE_R * $riskDist : $price + self::TRAIL_DISTANCE_R * $riskDist;
+        } elseif ($profitR >= self::TRAIL_BREAKEVEN_R && !($d['trail_be'] ?? false)) {
+            $target = $long ? $d['entry'] * 1.0006 : $d['entry'] * 0.9994;      // небольшой буфер сверх входа на комиссию
+            $this->directional[$sym]['trail_be'] = true;
+        }
+        if ($target === null) {
+            return;
+        }
+        $newStop = (float)$inst->roundPrice($target, !$long);
+        $improves = $long ? $newStop > $d['stop'] : $newStop < $d['stop'];
+        if (!$improves) {
+            return;                                          // стоп двигаем только в свою пользу, никогда не расширяем риск
+        }
+        try {
+            $this->ex->setStopLoss($sym, (string)$newStop);
+            $this->directional[$sym]['stop'] = $newStop;
+        } catch (\Throwable $e) {
+            Log::error("user {$this->userId}: не удалось подвинуть стоп $sym: " . $e->getMessage());
+        }
+    }
+
+    /** По коррелирующей монете (см. CORRELATION_GROUPS) уже есть автоматическая направленная ставка. */
+    private function correlatedDirectionalOpen(string $sym): bool
+    {
+        foreach (self::CORRELATION_GROUPS as $group) {
+            if (!in_array($sym, $group, true)) {
+                continue;
+            }
+            foreach ($group as $other) {
+                if ($other !== $sym && isset($this->directional[$other]) && $this->directional[$other]['strategy'] !== 'manual') {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Азиатская ночь по UTC — минимальная ликвидность даже на мажорах, новых направленных ставок не берём. */
+    private function quietHours(float $now): bool
+    {
+        $h = (int)gmdate('G', (int)$now);
+        return $h >= 0 && $h < 5;
+    }
+
+    /** ATR исчезающе мал относительно цены — рынок «спит», сигналы в такой момент ненадёжны. */
+    private function quietMarket(array $f): bool
+    {
+        return empty($f['price']) || ($f['atr'] / $f['price']) < 0.0007;
     }
 
     private function openDirectional(string $sym, array $s, array $ins, float $weight): void
@@ -390,6 +511,9 @@ final class Worker
             $t['paper_balance'] = $this->ex->balance;
         }
         ($this->record)($this->userId, $t);
+        if (in_array($strategy, ['trend', 'liquidation'], true)) {
+            $this->guard->recordDirectionalTrade();
+        }
         if ($this->guard->onTrade($pnl, microtime(true))) {
             ($this->notify)($this->userId, "⏸ {$this->prof['max_consecutive_losses']} убытка подряд — пауза 3 часа");
         }

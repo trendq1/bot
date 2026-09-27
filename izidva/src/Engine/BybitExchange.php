@@ -94,6 +94,13 @@ final class BybitExchange implements ExchangeInterface
         $this->api->post('/v5/order/create', $body);
     }
 
+    /** Трейлинг-стоп: двигаем только стоп уже открытой позиции, тейк не трогаем. */
+    public function setStopLoss(string $symbol, string $stop): void
+    {
+        $this->api->post('/v5/position/trading-stop', ['category' => 'linear', 'symbol' => $symbol,
+            'stopLoss' => $stop, 'tpslMode' => 'Full', 'positionIdx' => 0]);
+    }
+
     public function cancel(string $symbol, string $linkId): void
     {
         try {
