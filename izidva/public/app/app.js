@@ -97,6 +97,19 @@ async function loadHome() {
   } catch (e) { toast(e.message); }
 }
 
+/** Плавна крива через точки (Catmull-Rom → Bezier) — виглядає як справжній графік, а не ламана лінія. */
+function smoothPath(pts) {
+  if (pts.length < 3) return pts.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join("");
+  let d = `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || p2;
+    const c1x = p1.x + (p2.x - p0.x) / 6, c1y = p1.y + (p2.y - p0.y) / 6;
+    const c2x = p2.x - (p3.x - p1.x) / 6, c2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`;
+  }
+  return d;
+}
+
 function drawEquity(points) {
   const box = $("equityChart");
   if (!points || points.length < 2) { box.innerHTML = `<div class="empty">${t("chart_placeholder")}</div>`; return; }
@@ -107,21 +120,34 @@ function drawEquity(points) {
   const pad = (max - min) * 0.1; min -= pad; max += pad;
   const x = (i) => pl + (i / (points.length - 1)) * (W - pl - pr);
   const y = (v) => pt + (1 - (v - min) / (max - min)) * (H - pt - pb);
-  const line = points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join("");
+  const xy = points.map((p, i) => ({ x: x(i), y: y(p.v) }));
+  const line = smoothPath(xy);
   const ticks = [0, 0.5, 1].map((k) => min + (max - min) * k);
   const up = vs[vs.length - 1] >= vs[0];
+  const c = up ? "#22e6a0" : "#ef5350";
   box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${t("profitability")} 30d">
-    <defs><linearGradient id="eqf" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#3987e5" stop-opacity=".28"/><stop offset="1" stop-color="#3987e5" stop-opacity="0"/></linearGradient></defs>
-    ${ticks.map((tk) => `<line x1="${pl}" x2="${W - pr}" y1="${y(tk)}" y2="${y(tk)}" stroke="#262a33" stroke-width="1"/><text x="${pl - 6}" y="${y(tk) + 4}" fill="#7d8290" font-size="10" text-anchor="end">${Math.round(tk).toLocaleString(locale())}</text>`).join("")}
-    <text x="${pl}" y="${H - 6}" fill="#7d8290" font-size="10">${esc(points[0].t)}</text>
-    <text x="${W - pr}" y="${H - 6}" fill="#7d8290" font-size="10" text-anchor="end">${esc(points[points.length - 1].t)}</text>
+    <defs>
+      <linearGradient id="eqf" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="${c}" stop-opacity=".32"/><stop offset="1" stop-color="${c}" stop-opacity="0"/></linearGradient>
+      <linearGradient id="eql" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="${c}" stop-opacity=".65"/><stop offset="1" stop-color="${c}"/></linearGradient>
+    </defs>
+    ${ticks.map((tk) => `<line x1="${pl}" x2="${W - pr}" y1="${y(tk)}" y2="${y(tk)}" stroke="#ffffff14" stroke-width="1"/><text x="${pl - 6}" y="${y(tk) + 4}" fill="#7f8c86" font-size="10" text-anchor="end">${Math.round(tk).toLocaleString(locale())}</text>`).join("")}
+    <text x="${pl}" y="${H - 6}" fill="#7f8c86" font-size="10">${esc(points[0].t)}</text>
+    <text x="${W - pr}" y="${H - 6}" fill="#7f8c86" font-size="10" text-anchor="end">${esc(points[points.length - 1].t)}</text>
     <path d="${line}L${x(points.length - 1)},${H - pb}L${pl},${H - pb}Z" fill="url(#eqf)"/>
-    <path d="${line}" fill="none" stroke="#3987e5" stroke-width="2" stroke-linejoin="round"/>
-    <line id="eqX" y1="${pt}" y2="${H - pb}" stroke="#b4b8c2" stroke-width="1" stroke-dasharray="3 3" visibility="hidden"/>
-    <circle id="eqDot" r="4" fill="#3987e5" stroke="#15171c" stroke-width="2" visibility="hidden"/>
+    <path id="eqLine" d="${line}" fill="none" stroke="url(#eql)" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+    <line id="eqX" y1="${pt}" y2="${H - pb}" stroke="#aeb8b3" stroke-width="1" stroke-dasharray="3 3" visibility="hidden"/>
+    <circle id="eqDot" r="4" fill="${c}" stroke="#0e1a15" stroke-width="2" visibility="hidden"/>
     <rect x="${pl}" y="0" width="${W - pl - pr}" height="${H}" fill="transparent" id="eqHit"/>
   </svg>`;
   const svg = box.querySelector("svg"), tip = $("tip");
+  const eqLine = svg.getElementById("eqLine");
+  const len = eqLine.getTotalLength();
+  eqLine.style.strokeDasharray = len; eqLine.style.strokeDashoffset = len;
+  eqLine.style.transition = "none";
+  requestAnimationFrame(() => {
+    eqLine.style.transition = "stroke-dashoffset 1s cubic-bezier(.3,.7,.2,1)";
+    eqLine.style.strokeDashoffset = "0";
+  });
   const move = (ev) => {
     const r = svg.getBoundingClientRect();
     const px = (ev.clientX - r.left) * (W / r.width);
@@ -184,7 +210,7 @@ async function loadCalendar() {
     let bg = "", label = "";
     if (v && v.trades) {
       const frac = 0.25 + 0.75 * Math.min(1, Math.abs(v.pnl) / maxAbs);
-      bg = v.pnl === 0 ? "" : `background:${mix("#2a2d35", v.pnl > 0 ? "#26a69a" : "#ef5350", frac)}`;
+      bg = v.pnl === 0 ? "" : `background:${mix("#182018", v.pnl > 0 ? "#22e6a0" : "#ef5350", frac)}`;
       label = compact(v.pnl);
     }
     html += `<div class="day ${key === todayKey ? "today" : ""}" style="${bg}" data-k="${key}" role="button" aria-label="${d} ${months[m]}: ${v ? money(v.pnl) + " USDT" : t("no_trades")}"><span class="d">${d}</span><span class="p num">${label}</span></div>`;
@@ -235,12 +261,12 @@ function ensureChart() {
   if (chartState.chart || !window.LightweightCharts) return chartState.chart;
   const box = $("tradeChart");
   chartState.chart = LightweightCharts.createChart(box, {
-    width: box.clientWidth, height: 280, layout: { background: { color: "transparent" }, textColor: "#b4b8c2", fontFamily: "Inter, sans-serif" },
-    grid: { vertLines: { color: "#1c1f26" }, horzLines: { color: "#1c1f26" } },
-    rightPriceScale: { borderColor: "#262a33" }, timeScale: { borderColor: "#262a33", timeVisible: true },
+    width: box.clientWidth, height: 280, layout: { background: { color: "transparent" }, textColor: "#aeb8b3", fontFamily: "Inter, sans-serif" },
+    grid: { vertLines: { color: "#ffffff0f" }, horzLines: { color: "#ffffff0f" } },
+    rightPriceScale: { borderColor: "#ffffff17" }, timeScale: { borderColor: "#ffffff17", timeVisible: true },
     crosshair: { mode: 0 },
   });
-  chartState.series = chartState.chart.addCandlestickSeries({ upColor: "#26a69a", downColor: "#ef5350", borderVisible: false, wickUpColor: "#26a69a", wickDownColor: "#ef5350" });
+  chartState.series = chartState.chart.addCandlestickSeries({ upColor: "#22e6a0", downColor: "#ef5350", borderVisible: false, wickUpColor: "#22e6a0", wickDownColor: "#ef5350" });
   window.addEventListener("resize", () => { if (chartState.chart) chartState.chart.applyOptions({ width: box.clientWidth }); });
   return chartState.chart;
 }
@@ -272,14 +298,14 @@ async function loadChart(symbol, silent = false) {
     if (chartState.symbol !== symbol) return;                // символ уже сменили, пока грузилось
     chartState.series.setData(r.candles);
     chartState.series.setMarkers(r.markers.map((m) => m.kind === "entry"
-      ? { time: m.time, position: m.side === "Buy" ? "belowBar" : "aboveBar", color: m.side === "Buy" ? "#26a69a" : "#ef5350", shape: m.side === "Buy" ? "arrowUp" : "arrowDown", text: "" }
-      : { time: m.time, position: m.side === "Buy" ? "aboveBar" : "belowBar", color: "#b4b8c2", shape: "circle", text: money(m.pnl, true) }));
+      ? { time: m.time, position: m.side === "Buy" ? "belowBar" : "aboveBar", color: m.side === "Buy" ? "#22e6a0" : "#ef5350", shape: m.side === "Buy" ? "arrowUp" : "arrowDown", text: "" }
+      : { time: m.time, position: m.side === "Buy" ? "aboveBar" : "belowBar", color: "#aeb8b3", shape: "circle", text: money(m.pnl, true) }));
     chartState.lines.forEach((l) => { try { chartState.series.removePriceLine(l); } catch (e) {} });
     chartState.lines = [];
     const info = [];
     (r.live || []).forEach((l) => {
       if (l.kind === "position") {
-        chartState.lines.push(chartState.series.createPriceLine({ price: l.entry, color: l.side === "Buy" ? "#26a69a" : "#ef5350", lineWidth: 1, lineStyle: 2, title: l.side === "Buy" ? "▲" : "▼" }));
+        chartState.lines.push(chartState.series.createPriceLine({ price: l.entry, color: l.side === "Buy" ? "#22e6a0" : "#ef5350", lineWidth: 1, lineStyle: 2, title: l.side === "Buy" ? "▲" : "▼" }));
         chartState.lines.push(chartState.series.createPriceLine({ price: l.stop, color: "#fab219", lineWidth: 1, lineStyle: 2, title: "stop" }));
         info.push(t("current_position", { side: l.side === "Buy" ? t("long") : t("short"), entry: l.entry, stop: l.stop }));
       } else if (l.kind === "grid") {
