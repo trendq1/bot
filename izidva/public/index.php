@@ -1,3 +1,8 @@
 <?php
 require __DIR__ . '/../src/bootstrap.php';
-header('Location: ' . (App\Env::configured() ? 'admin/' : 'migrate.php'));
+if (!App\Env::configured()) {
+    header('Location: migrate.php');
+    exit;
+}
+header('Content-Type: text/html; charset=utf-8');
+readfile(__DIR__ . '/landing/index.html');
