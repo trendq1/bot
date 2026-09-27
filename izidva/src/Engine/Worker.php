@@ -197,7 +197,7 @@ final class Worker
     private function onGridEvent(string $sym, Grid $grid, array $ev, string $regime): void
     {
         $this->recordTrade($sym, 'grid', $ev['side'], $ev['qty'], $ev['entry'], $ev['exit'], $ev['pnl'],
-            $ev['pnl'] / $grid->unitRisk(), $regime, $ev['kind'] === 'stop');
+            $ev['pnl'] / $grid->unitRisk(), $regime);
     }
 
     /**
@@ -253,7 +253,6 @@ final class Worker
         try {
             $this->ex->placeMarket($sym, $long ? 'Sell' : 'Buy', $half, null, null, true);
             $this->directional[$sym]['partial_done'] = true;
-            ($this->notify)($this->userId, "💰 $sym: зафиксирована часть прибыли на +" . self::PARTIAL_TAKE_R . 'R, остаток ведём трейлинг-стопом');
         } catch (\Throwable $e) {
             Log::error("user {$this->userId}: не удалось частично закрыть $sym: " . $e->getMessage());
         }
@@ -340,9 +339,7 @@ final class Worker
         $this->ex->placeMarket($sym, $s['side'], $q, $stop, $take);
         $this->directional[$sym] = ['strategy' => $s['strategy'], 'side' => $s['side'], 'entry' => $s['entry'], 'stop' => (float)$stop,
             'qty' => (float)$q, 'regime' => $ins['regime'], 'opened_ms' => (int)(microtime(true) * 1000), 'risk_usd' => (float)$q * $s['risk']];
-        $name = $s['strategy'] === 'trend' ? 'Тренд' : 'Отскок после ликвидаций';
-        ($this->notify)($this->userId, ($long ? '🟢 LONG' : '🔴 SHORT') . " $sym · $name\nВход " . self::fmt($s['entry'])
-            . ' · SL ' . $stop . ' · TP ' . $take);
+        // Уведомление о входе стратегии в Telegram отключено — клиент видит открытые позиции в приложении.
     }
 
     /**
@@ -499,12 +496,12 @@ final class Worker
                 Log::warn(sprintf('user %d: %s %s — убыток %.2fR больше расчётного риска (вход %s, стоп %s, выход %s, объём %s)',
                     $this->userId, $sym, $d['strategy'], $r, self::fmt($d['entry']), self::fmt($d['stop']), self::fmt($exit), self::fmt($d['qty'])));
             }
-            $this->recordTrade($sym, $d['strategy'], $d['side'], $d['qty'], $d['entry'], $exit, $pnl, $r, $d['regime'], true);
+            $this->recordTrade($sym, $d['strategy'], $d['side'], $d['qty'], $d['entry'], $exit, $pnl, $r, $d['regime']);
         }
     }
 
     private function recordTrade(string $sym, string $strategy, string $side, float $qty, float $entry, float $exit,
-                                 float $pnl, float $r, string $regime, bool $notify): void
+                                 float $pnl, float $r, string $regime): void
     {
         $t = compact('strategy', 'side', 'qty', 'entry', 'exit', 'pnl', 'r', 'regime') + ['symbol' => $sym, 'mode' => $this->ex->mode()];
         if ($this->ex instanceof PaperExchange) {
@@ -514,12 +511,8 @@ final class Worker
         if (in_array($strategy, ['trend', 'liquidation'], true)) {
             $this->guard->recordDirectionalTrade();
         }
-        if ($this->guard->onTrade($pnl, microtime(true))) {
-            ($this->notify)($this->userId, "⏸ {$this->prof['max_consecutive_losses']} убытка подряд — пауза 3 часа");
-        }
-        if ($notify) {
-            ($this->notify)($this->userId, ($pnl >= 0 ? '✅' : '❌') . " $sym · $strategy: " . sprintf('%+.2f', $pnl) . ' USDT');
-        }
+        $this->guard->onTrade($pnl, microtime(true));
+        // Уведомления о входах/выходах и паузе в Telegram отключены — клиент смотрит сделки и статус в приложении.
     }
 
     public function liveState(): array
