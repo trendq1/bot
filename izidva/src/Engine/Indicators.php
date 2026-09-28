@@ -117,11 +117,15 @@ final class Indicators
         $std = sqrt(array_sum(array_map(fn($x) => ($x - $mean) ** 2, $w)) / 20);
         $v48 = array_sum(array_slice($vol, -48));
         $vwap = $v48 ? array_sum(array_slice($turn, -48)) / $v48 : $price;
+        // объём последней закрытой свечи против среднего за предыдущие 48 — всплеск объёма как признак пробоя.
+        $volAvg48 = array_sum(array_slice($vol, -49, 48)) / 48;
+        $volRatio = $volAvg48 ? $vol[$n - 2] / $volAvg48 : 1.0;
+        $ema20Slope = $e20[$n - 2] ? ($e20[$n - 1] - $e20[$n - 2]) / $e20[$n - 2] * 100 : 0.0;
 
         return [
             'price' => $price,
-            'ema20' => $e20[$n - 1], 'ema50' => $e50[$n - 1], 'ema200' => $e200[$n - 1],
-            'atr' => $atr, 'atr_pct' => $atr / $price * 100, 'atr_pct_median' => $median * 100,
+            'ema20' => $e20[$n - 1], 'ema50' => $e50[$n - 1], 'ema200' => $e200[$n - 1], 'ema20_slope_pct' => $ema20Slope,
+            'atr' => $atr, 'atr_pct' => $atr / $price * 100, 'atr_pct_median' => $median * 100, 'vol_ratio' => $volRatio,
             'adx' => self::adx($h, $l, $c), 'rsi' => self::rsi($c),
             'bb_width_pct' => 4 * $std / $mean * 100,
             'ret_1h' => ($price / $c[$n - 13] - 1) * 100,
@@ -150,5 +154,21 @@ final class Indicators
             return 'trend_down';
         }
         return 'range';
+    }
+
+    /**
+     * Жёсткий, не зависящий от ИИ/regime признак резкого выброса волатильности (ATR намного выше своей медианы) —
+     * Grid Safety: используется как code-level блок новых сеток, который AI не может переопределить весами.
+     */
+    public static function isExtremeVolatility(array $f, float $mult = 3.0): bool
+    {
+        return ($f['atr_pct_median'] ?? 0) > 0 && $f['atr_pct'] > $mult * $f['atr_pct_median'];
+    }
+
+    /** Пробой: одновременно расширение ATR, всплеск объёма и резкий наклон EMA20 — сильнее сигнал, чем один ATR. */
+    public static function isBreakout(array $f): bool
+    {
+        return ($f['atr_pct_median'] ?? 0) > 0 && $f['atr_pct'] > 1.8 * $f['atr_pct_median']
+            && ($f['vol_ratio'] ?? 1.0) > 1.8 && abs($f['ema20_slope_pct'] ?? 0.0) > 0.15;
     }
 }

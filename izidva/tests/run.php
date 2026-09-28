@@ -138,6 +138,15 @@ test('лимитный ордер и прибыль', function () {
     check($ex->positions() === [], 'закрыт');
     check(near($ex->balance, 1000 + 10 - (990 + 1000) * 0.0002), 'баланс с комиссиями');
 });
+test('reduceOnly маркет-ордер по уже закрытой позиции — не падает делением на ноль', function () {
+    $ex = new PaperExchange(1000);
+    $ex->updatePrices(['BTCUSDT' => 100000]);
+    $ex->placeMarket('BTCUSDT', 'Buy', '0.01');
+    $ex->placeMarket('BTCUSDT', 'Sell', '0.01', null, null, true);   // позиция уже закрыта этим вызовом
+    check($ex->positions() === [], 'позиция закрыта');
+    $ex->placeMarket('BTCUSDT', 'Sell', '0.005', null, null, true);  // reduceOnly по уже плоской позиции — раньше делил на ноль
+    check($ex->positions() === [], 'повторный reduceOnly на плоской позиции — no-op, не исключение');
+});
 test('лимитный ордер с тейком и стопом (ручная торговля)', function () {
     $ex = new PaperExchange(1000);
     $ex->updatePrices(['BTCUSDT' => 100000]);
@@ -223,6 +232,17 @@ test('признаки и режим', function () {
     check($f !== null && $f['ema50'] > $f['ema200'], 'тренд вверх');
     check(Indicators::ruleRegime(Indicators::features(klines(300))) === 'range', 'боковик');
     check(Indicators::features(klines(100)) === null, 'мало свечей');
+    check(isset($f['vol_ratio']) && near($f['vol_ratio'], 1.0, 0.5), 'vol_ratio считается (при равномерном объёме генератора ≈1)');
+    check(isset($f['ema20_slope_pct']), 'ema20_slope_pct считается');
+});
+test('Grid Safety: жёсткие признаки экстремальной волатильности и пробоя, не зависящие от ИИ', function () {
+    $calm = ['atr_pct' => 0.3, 'atr_pct_median' => 0.3, 'vol_ratio' => 1.0, 'ema20_slope_pct' => 0.01];
+    check(!Indicators::isExtremeVolatility($calm) && !Indicators::isBreakout($calm), 'спокойный рынок — оба признака false');
+    $spike = ['atr_pct' => 1.2, 'atr_pct_median' => 0.3, 'vol_ratio' => 1.0, 'ema20_slope_pct' => 0.01];
+    check(Indicators::isExtremeVolatility($spike), 'ATR в 4 раза выше медианы — экстремальная волатильность');
+    $breakout = ['atr_pct' => 0.7, 'atr_pct_median' => 0.3, 'vol_ratio' => 2.5, 'ema20_slope_pct' => 0.3];
+    check(Indicators::isBreakout($breakout), 'ATR расширяется + всплеск объёма + крутой наклон EMA — пробой');
+    check(!Indicators::isExtremeVolatility([]) && !Indicators::isBreakout([]), 'без данных (нет atr_pct_median) — не падает и не блокирует зря');
 });
 test('тренд после отката', function () {
     $f = ['atr' => 1.0, 'price' => 101.0, 'ema20' => 100.5, 'ema20_1' => 100.4, 'low_5' => 100.3, 'c1' => 100.9, 'o1' => 100.5,
@@ -262,6 +282,25 @@ test('дневной лимит и пауза', function () {
     }
     check($g->onTrade(-1, 0) && !$g->allowed(1000, 10)[0], 'пауза после 4 убытков');
 });
+test('Portfolio Risk Engine: лимит суммарного плавающего убытка блокирует новые входы', function () {
+    $g = new RiskGuard(Risk::profile('balanced'));                // max_floating_loss_pct = 6.0
+    $g->updateEquity(1000);
+    check($g->allowed(1000, 0, -50.0)[0], 'плавающий минус 5% — ещё разрешено');
+    [$ok, $reason] = $g->allowed(1000, 0, -60.0);
+    check(!$ok && str_contains($reason, 'плавающий убыток портфеля'), 'плавающий минус 6% — новые входы заблокированы');
+    check($g->allowed(1000, 0, 30.0)[0], 'плавающая прибыль не блокирует');
+});
+test('Adaptive Risk: множитель снижается с просадкой от пика equity и сам восстанавливается', function () {
+    $g = new RiskGuard(Risk::profile('balanced'));
+    $g->updateEquity(1000);
+    check(near($g->adaptiveMult(1000), 1.0), 'на пике — множитель 1.0');
+    $g->updateEquity(1200);
+    check(near($g->adaptiveMult(1200), 1.0), 'новый пик — всё ещё 1.0');
+    check($g->adaptiveMult(1080) < 1.0 && $g->adaptiveMult(1080) > 0.4, 'просадка 10% от пика 1200 — множитель снижен, но не в ноль');
+    check(near($g->adaptiveMult(600), 0.4), 'глубокая просадка — множитель упирается в пол 0.4, не уходит в 0');
+    $g->updateEquity(1200);
+    check(near($g->adaptiveMult(1200), 1.0), 'equity вернулась к пику — множитель сам восстановился до 1.0');
+});
 test('границы ответа ИИ', function () {
     $i = AIAnalyst::clamp(['regime' => 'moon', 'w_grid' => 5, 'risk_mult' => 9, 'grid_mode' => 'x', 'grid_step_atr' => 0.01], 'ai');
     check($i['regime'] === 'range' && $i['w_grid'] == 1 && $i['risk_mult'] == 1.2 && $i['grid_mode'] === 'off' && $i['grid_step_atr'] == 0.3, 'clamp');
@@ -297,6 +336,25 @@ test('настройки: битое шифрование одного поля 
     check($s['bot_token'] === '', 'битое поле читается как «не задано», а не бросает исключение');
     check($s['ai_interval_min'] === 30, 'остальные настройки при этом читаются нормально');
     Settings::save(['bot_token' => '']);
+});
+test('Learner: не только winrate — Profit Factor, Expectancy, Avg Win/Loss, худший R', function () {
+    $l = new Learner();
+    $l->record('TESTUSDT', 'grid', 'range', 0.03, 0.06);
+    $l->record('TESTUSDT', 'grid', 'range', 0.02, 0.04);
+    $l->record('TESTUSDT', 'grid', 'range', 0.025, 0.05);
+    $l->record('TESTUSDT', 'grid', 'range', -6.0, -12.0);        // один крупный стоп топит десятки мелких побед
+    $s = $l->statsFor('TESTUSDT')['grid/range'];
+    check($s['trades'] === 4 && $s['winrate'] === 0.75, '75% побед по количеству сделок');
+    check($s['profit_factor'] < 1.0, 'при этом Profit Factor < 1 — реально убыточно, winrate вводит в заблуждение');
+    check($s['expectancy_r'] < 0, 'ожидание в R отрицательное');
+    check(near($s['expectancy_usd'], (0.06 + 0.04 + 0.05 - 12.0) / 4, 1e-6), 'ожидание в $ считается по сумме pnl / число сделок');
+    check(near($s['worst_r'], -6.0), 'худший R сохранён без клэмпа — видно реальный масштаб хвостового убытка');
+    check(near($s['avg_win_r'], (0.03 + 0.02 + 0.025) / 3, 1e-6), 'средний выигрыш в R');
+    check(near($s['avg_loss_r'], 6.0), 'средний проигрыш в R');
+    // перечитываем из БД свежий Learner — статистика должна была сохраниться, не только в памяти
+    $l2 = new Learner();
+    $l2->load();
+    check(near($l2->statsFor('TESTUSDT')['grid/range']['worst_r'], -6.0), 'статистика сохранена в БД и читается заново');
 });
 
 echo "ИИ через официальный SDK (заглушка API)\n";
@@ -421,6 +479,45 @@ test('коррелирующие монеты: вторую сетку в той
         function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
     $w->step(6000.0);
     check(isset($w->grids['ADAUSDT']) && !isset($w->grids['XRPUSDT']), 'из XRPUSDT/ADAUSDT (одна группа) сетка открылась только на первой по списку');
+});
+test('Grid Safety: новая сетка не открывается при экстремальной волатильности, даже если веса ИИ говорят «грид»', function () {
+    $sol = new Instrument('SOLUSDT', '0.01', '0.1', 0.1, 10000, 5, 50);
+    $market = new Market(['SOLUSDT']);
+    $market->instruments['SOLUSDT'] = $sol;
+    $market->feeds['SOLUSDT']->price = 100.0;
+    $brain = new Brain(new Learner());
+    // ИИ (алгоритм) настаивает на сетке (w_grid=1.0, grid_mode=long) — но ATR в 5 раз выше медианы: код должен заблокировать вход сам.
+    $brain->features['SOLUSDT'] = ['price' => 100.0, 'atr' => 1.0, 'ema20' => 100, 'ema20_1' => 100, 'last_closed_ts' => 1.0, 'vwap_4h' => 100,
+        'atr_pct' => 5.0, 'atr_pct_median' => 1.0, 'vol_ratio' => 1.0, 'ema20_slope_pct' => 0.0];
+    $brain->insights['SOLUSDT'] = ['regime' => 'high_volatility', 'confidence' => 0.8, 'w_grid' => 1.0, 'w_trend' => 0.1, 'w_liquidation' => 0.1,
+        'grid_mode' => 'long', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+    $ex = new PaperExchange(10000);
+    $w = new Worker(785, $ex, $market, $brain, Risk::profile('balanced'), ['SOLUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->step(8000.0);
+    check(!isset($w->grids['SOLUSDT']), 'экстремальный ATR — жёсткий код-блок сработал, сетка не открылась');
+});
+test('Grid Risk Protection: max_total_grid_risk_pct ограничивает суммарный риск всех сеток', function () {
+    $sol = new Instrument('SOLUSDT', '0.01', '0.1', 0.1, 10000, 5, 50);
+    $doge = new Instrument('DOGEUSDT', '1', '0.00001', 0.00001, 10000000, 5, 50);
+    $market = new Market(['SOLUSDT', 'DOGEUSDT']);
+    $market->instruments['SOLUSDT'] = $sol;
+    $market->instruments['DOGEUSDT'] = $doge;
+    $market->feeds['SOLUSDT']->price = 100.0;
+    $market->feeds['DOGEUSDT']->price = 0.1;
+    $brain = new Brain(new Learner());
+    $ins = ['regime' => 'range', 'confidence' => 0.8, 'w_grid' => 1.0, 'w_trend' => 0.1, 'w_liquidation' => 0.1,
+        'grid_mode' => 'long', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+    $brain->features['DOGEUSDT'] = ['price' => 0.1, 'atr' => 0.002, 'ema20' => 0.1, 'ema20_1' => 0.1, 'last_closed_ts' => 1.0, 'vwap_4h' => 0.1];
+    $brain->insights['DOGEUSDT'] = $ins;
+    $ex = new PaperExchange(1000);
+    $w = new Worker(784, $ex, $market, $brain, Risk::profile('balanced'), ['SOLUSDT', 'DOGEUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    // уже открыта сетка на SOLUSDT (другая корреляционная группа, чем DOGEUSDT) с риском 60$ — как будто ИИ поднимал risk_mult
+    $existingPlan = ['mode' => 'long', 'center' => 100.0, 'step_pct' => 0.5, 'levels' => 6, 'qty' => '1', 'max_loss' => 60.0];
+    $w->grids['SOLUSDT'] = new Grid($ex, 'SOLUSDT', $sol, $existingPlan);
+    $w->step(7000.0);
+    check(!isset($w->grids['DOGEUSDT']), 'equity 1000$, cap 7.5%=75$, уже занято 60$ — новая сетка (+25$) превысила бы лимит, не открылась');
 });
 test('стоп сетки на реальной бирже: PnL считается по факту с биржи, а не по цене до отправки ордера', function () {
     $sol = new Instrument('SOLUSDT', '0.01', '0.1', 0.1, 10000, 5, 50);
@@ -841,6 +938,28 @@ test('дневной лимит числа направленных сделок
     $guard->day = gmdate('Y-m-d', strtotime('-1 day'));           // «вчера» — новый день сбросит счётчик
     $guard->updateEquity(1000.0);
     check($guard->directionalTradesLeft() === 4, 'на следующий день лимит обнуляется');
+});
+test('Cooldown: после крупного убытка направленной сделки — пауза перед новой ставкой на той же монете', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 101.0;
+    $brain = new Brain(new Learner());
+    $f = ['atr' => 1.0, 'price' => 101.0, 'ema20' => 100.5, 'ema20_1' => 100.4, 'low_5' => 100.3, 'c1' => 100.9, 'o1' => 100.5,
+        'h2' => 100.8, 'l2' => 100.0, 'rsi' => 58, 'low_10' => 99.5, 'high_10' => 102, 'high_5' => 101.5, 'last_closed_ts' => 1.0];
+    $brain->features['BTCUSDT'] = $f;
+    $brain->insights['BTCUSDT'] = ['regime' => 'trend_up', 'confidence' => 0.8, 'w_grid' => 0.0, 'w_trend' => 1.0, 'w_liquidation' => 0.0,
+        'grid_mode' => 'off', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 101.0]);
+    $now = gmmktime(12, 0, 0);
+    $w = new Worker(786, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->lastBigLoss['BTCUSDT'] = $now - 60;                    // крупный убыток минуту назад
+    $w->step((float)$now);
+    check(!isset($w->directional['BTCUSDT']), 'сразу после крупного убытка новая направленная сделка на этой монете не открывается');
+    $w->lastBigLoss['BTCUSDT'] = $now - Worker::BIG_LOSS_COOLDOWN_SEC - 60;   // пауза давно прошла
+    $w->step((float)$now);
+    check(isset($w->directional['BTCUSDT']), 'после окончания паузы сделка снова может открыться');
 });
 test('досрочный выход из тренда при развороте, не дожидаясь стопа', function () use ($BTC) {
     $market = new Market(['BTCUSDT']);

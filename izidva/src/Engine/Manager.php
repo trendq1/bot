@@ -328,11 +328,12 @@ final class Manager
     {
         DB::insert('trades', ['user_id' => $uid, 'symbol' => $t['symbol'], 'strategy' => $t['strategy'], 'side' => $t['side'],
             'qty' => $t['qty'], 'entry' => $t['entry'], 'exit' => $t['exit'], 'pnl' => $t['pnl'], 'r' => $t['r'],
-            'regime' => $t['regime'], 'mode' => $t['mode'], 'opened_at' => DB::now(), 'closed_at' => DB::now()]);
+            'regime' => $t['regime'], 'session_id' => $t['session_id'] ?? null, 'kind' => $t['kind'] ?? null,
+            'mode' => $t['mode'], 'opened_at' => DB::now(), 'closed_at' => DB::now()]);
         if (isset($t['paper_balance'])) {
             DB::update('bot_settings', ['paper_balance' => $t['paper_balance']], 'user_id = :u', [':u' => $uid]);
         }
-        $this->brain->learner->record($t['symbol'], $t['strategy'], $t['regime'] ?: 'range', (float)$t['r']);
+        $this->brain->learner->record($t['symbol'], $t['strategy'], $t['regime'] ?: 'range', (float)$t['r'], (float)$t['pnl']);
     }
 
     public function saveSnapshot(int $uid, float $equity): void

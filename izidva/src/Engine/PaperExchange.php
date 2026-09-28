@@ -67,6 +67,9 @@ final class PaperExchange implements ExchangeInterface
 
     private function trade(string $symbol, string $side, float $qty, float $price, float $fee): void
     {
+        if ($qty <= 0) {
+            return;                                          // нулевой объём (например, reduceOnly по уже закрытой позиции) — не сделка
+        }
         $p = $this->pos[$symbol] ?? ['size' => 0.0, 'entry' => 0.0, 'stop' => null, 'take' => null];
         $signed = $side === 'Buy' ? $qty : -$qty;
         $this->balance -= $qty * $price * $fee;

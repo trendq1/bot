@@ -127,12 +127,23 @@ VIEWS.overview = async () => {
     </div>
     <div class="card"><h3>Доходы и расходы по дням</h3><div class="chart" id="finChart"></div>
       <div class="legend"><span><i style="background:#3987e5"></i>Доход</span><span><i style="background:#d95926"></i>Расход</span></div></div>
+    <div class="card"><h3>Trade Analytics <span class="muted small">— не Win Rate, а реальная математика сделок</span></h3><div class="grid kpis" id="taKpis">Загрузка…</div></div>
     <div class="grid cols2">
       <div class="card"><h3>Торговый движок</h3>${engineBlock(d.engine)}</div>
       <div class="card"><h3>Последние оплаты</h3>${table(["Клиент", "Тариф", "⭐", "$", "Когда"], d.recent_payments.map((p) => `<tr><td>${esc(p.user)}</td><td>${p.plan}</td><td>${p.stars}</td><td>${usd(p.usd)}</td><td>${dt(p.at)}</td></tr>`))}
         <h3 style="margin-top:14px">Действия администраторов</h3>${table(["Кто", "Действие", "Когда"], d.recent_audit.map((a) => `<tr><td>${esc(a.actor)}</td><td>${esc(a.action)} <span class="muted small">${esc(a.details || "")}</span></td><td>${dt(a.at)}</td></tr>`))}</div>
     </div>`;
   barsChart($("finChart"), d.series);
+  api("/analytics?days=" + days).then((t) => {
+    $("taKpis").innerHTML = `
+      ${kpi("Profit Factor", t.profit_factor == null ? "—" : t.profit_factor, t.profit_factor != null && t.profit_factor < 1 ? "< 1 — убыточно" : "", t.profit_factor != null ? cls(t.profit_factor - 1) : "")}
+      ${kpi("Expectancy / сделку", usd(t.expectancy_usd, true), `${t.trades} сделок`, cls(t.expectancy_usd))}
+      ${kpi("Net PnL за период", usd(t.net_pnl, true), "", cls(t.net_pnl))}
+      ${kpi("Крупнейший убыток", usd(t.largest_loss), "")}
+      ${kpi("Доля топ-5% убытков", t.top5pct_losses_share_pct + "%", "от суммы всех убытков")}
+      ${kpi("Просадка (реал. PnL)", usd(t.max_drawdown_realized), "от локального пика")}
+    `;
+  }).catch(() => { $("taKpis").innerHTML = '<div class="muted">Нет данных</div>'; });
 };
 
 // ───────────── клиенты ─────────────
