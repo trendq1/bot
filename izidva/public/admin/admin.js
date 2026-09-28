@@ -446,7 +446,9 @@ VIEWS.manual = async () => {
       <h3>Новый ордер</h3>
       <label class="row" style="gap:8px"><input type="checkbox" id="mnAll" style="width:auto"> <b>Открыть сразу всем клиентам</b> <span class="muted small">(один и тот же ордер каждому)</span></label>
       <div class="grid2">
-        <label>Монета<input class="inp" id="mnSymbol" list="mnSymbolList" placeholder="BTCUSDT" style="text-transform:uppercase"><datalist id="mnSymbolList"></datalist></label>
+        <label>Монета<input class="inp" id="mnSymbol" placeholder="BTCUSDT" style="text-transform:uppercase" autocomplete="off">
+          <div id="mnSymbolChips" class="row" style="gap:6px;flex-wrap:wrap;margin-top:6px"></div>
+        </label>
         <label>Текущая цена<div class="row"><input class="inp" id="mnPrice0" readonly placeholder="—"><button class="btn" type="button" id="mnRefreshPrice">↻</button></div></label>
       </div>
       <div class="seg" id="mnSide"><button data-v="Buy">🟢 Buy / Long</button><button data-v="Sell">🔴 Sell / Short</button></div>
@@ -466,7 +468,8 @@ VIEWS.manual = async () => {
   const POS_LABEL = { grid: "Сетка", position: "Позиция", pending: "Лимит (ждёт)" };
   function renderInfo() {
     const c = client();
-    $("mnSymbolList").innerHTML = c.symbols.map((s) => `<option value="${s}">`).join("");
+    $("mnSymbolChips").innerHTML = c.symbols.map((s) => `<button type="button" class="btn small" data-sym="${s}">${s}</button>`).join("");
+    $("mnSymbolChips").querySelectorAll("button").forEach((b) => { b.onclick = () => { $("mnSymbol").value = b.dataset.sym; $("mnPrice0").value = ""; }; });
     if (!$("mnSymbol").value) { $("mnSymbol").value = c.symbols[0] || ""; }
     $("mnInfo").innerHTML = `Режим: <b>${c.manual_mode ? "ручной (автотрейдинг выключен)" : "автотрейдинг"}</b> · бот ${c.running ? "работает" : "остановлен"}` +
       (c.equity != null ? ` · баланс ${usd(c.equity)}` : "") + (c.status ? ` · ${esc(c.status)}` : "");
