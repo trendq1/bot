@@ -15,6 +15,8 @@ final class Worker
 {
     public const MAX_HOLD_SEC = 3 * 3600;
     public const LIQ_COOLDOWN_SEC = 20 * 60;
+    /** После стопа сетки на монете не открываем новую сразу — даём рынку успокоиться. */
+    public const GRID_STOP_COOLDOWN_SEC = 30 * 60;
     /** Монеты, которые обычно двигаются вместе — не берём вторую направленную ставку в той же группе одновременно. */
     public const CORRELATION_GROUPS = [
         ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'AVAXUSDT'],
@@ -35,6 +37,8 @@ final class Worker
     public array $pendingManual = [];
     public array $lastTrendBar = [];
     public array $lastLiq = [];
+    /** symbol => время последнего стопа сетки — для паузы перед новым входом на той же монете. */
+    public array $lastGridStop = [];
     public float $equity = 0.0;
     public string $status = 'запуск';
     private float $equityTs = 0.0;
@@ -126,7 +130,7 @@ final class Worker
         if (isset($this->grids[$sym])) {
             $grid = $this->grids[$sym];
             foreach ($grid->sync($feed->price) as $ev) {
-                $this->onGridEvent($sym, $grid, $ev, $ins['regime']);
+                $this->onGridEvent($sym, $grid, $ev, $ins['regime'], $now);
             }
             $want = $allowed && $ins['grid_mode'] === $grid->plan['mode'] && $w['grid'] >= 0.4;
             if ($grid->active && !$grid->draining && !$want) {
@@ -144,7 +148,9 @@ final class Worker
         }
         arsort($w);
         $best = array_key_first($w);
-        if ($best === 'grid' && $w['grid'] >= 0.5 && $ins['grid_mode'] !== 'off' && count($this->grids) < $this->prof['max_grids']) {
+        if ($best === 'grid' && $w['grid'] >= 0.5 && $ins['grid_mode'] !== 'off' && count($this->grids) < $this->prof['max_grids']
+            && (!isset($this->lastGridStop[$sym]) || $now - $this->lastGridStop[$sym] > self::GRID_STOP_COOLDOWN_SEC)
+            && !$this->correlatedGridOpen($sym)) {
             $this->startGrid($sym, $f, $ins, $tuning);
             return;
         }
@@ -194,8 +200,11 @@ final class Worker
             $plan['step_pct'], $plan['levels'], $plan['qty']));
     }
 
-    private function onGridEvent(string $sym, Grid $grid, array $ev, string $regime): void
+    private function onGridEvent(string $sym, Grid $grid, array $ev, string $regime, float $now): void
     {
+        if ($ev['kind'] === 'stop') {
+            $this->lastGridStop[$sym] = $now;                 // пауза перед новой сеткой на этой монете — см. GRID_STOP_COOLDOWN_SEC
+        }
         $this->recordTrade($sym, 'grid', $ev['side'], $ev['qty'], $ev['entry'], $ev['exit'], $ev['pnl'],
             $ev['pnl'] / $grid->unitRisk(), $regime);
     }
@@ -304,6 +313,25 @@ final class Worker
             }
             foreach ($group as $other) {
                 if ($other !== $sym && isset($this->directional[$other]) && $this->directional[$other]['strategy'] !== 'manual') {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * По коррелирующей монете (см. CORRELATION_GROUPS) уже открыта сетка — не открываем вторую в той же группе:
+     * при общем движении группы (например, альты вместе с BTC) несколько сеток может выбить стопом одновременно.
+     */
+    private function correlatedGridOpen(string $sym): bool
+    {
+        foreach (self::CORRELATION_GROUPS as $group) {
+            if (!in_array($sym, $group, true)) {
+                continue;
+            }
+            foreach ($group as $other) {
+                if ($other !== $sym && isset($this->grids[$other])) {
                     return true;
                 }
             }

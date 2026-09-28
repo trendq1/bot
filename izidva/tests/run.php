@@ -360,6 +360,45 @@ test('клиент: сетка → сделка → обучение → ост�
     check(DB::row('SELECT * FROM worker_state WHERE user_id = 555') !== null, 'состояние опубликовано');
     check(DB::row('SELECT * FROM engine_status WHERE id = 1') === null || true, 'engine_status');
 });
+test('после стопа сетки на монете есть пауза перед новым входом (GRID_STOP_COOLDOWN_SEC)', function () {
+    $sol = new Instrument('SOLUSDT', '0.01', '0.1', 0.1, 10000, 5, 50);
+    $market = new Market(['SOLUSDT']);
+    $market->instruments['SOLUSDT'] = $sol;
+    $market->feeds['SOLUSDT']->price = 100.0;
+    $brain = new Brain(new Learner());
+    $brain->features['SOLUSDT'] = ['price' => 100.0, 'atr' => 1.0, 'ema20' => 100, 'ema20_1' => 100, 'last_closed_ts' => 1.0, 'vwap_4h' => 100];
+    $brain->insights['SOLUSDT'] = ['regime' => 'range', 'confidence' => 0.8, 'w_grid' => 1.0, 'w_trend' => 0.1, 'w_liquidation' => 0.1,
+        'grid_mode' => 'long', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+    $ex = new PaperExchange(10000);
+    $w = new Worker(782, $ex, $market, $brain, Risk::profile('balanced'), ['SOLUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->lastGridStop['SOLUSDT'] = 5000.0;                     // симулируем недавний стоп сетки на этой монете
+    $w->step(5000.0 + Worker::GRID_STOP_COOLDOWN_SEC - 1);
+    check(!isset($w->grids['SOLUSDT']), 'сразу после стопа новая сетка на той же монете не открывается');
+    $w->step(5000.0 + Worker::GRID_STOP_COOLDOWN_SEC + 1);
+    check(isset($w->grids['SOLUSDT']), 'после паузы сетка снова может открыться');
+});
+test('коррелирующие монеты: вторую сетку в той же группе не открываем, пока активна первая', function () {
+    $ada = new Instrument('ADAUSDT', '0.0001', '1', 1, 100000, 5, 50);
+    $xrp = new Instrument('XRPUSDT', '0.0001', '1', 1, 100000, 5, 50);
+    $market = new Market(['ADAUSDT', 'XRPUSDT']);
+    $market->instruments['ADAUSDT'] = $ada;
+    $market->instruments['XRPUSDT'] = $xrp;
+    $market->feeds['ADAUSDT']->price = 0.25;
+    $market->feeds['XRPUSDT']->price = 1.5;
+    $brain = new Brain(new Learner());
+    $ins = ['regime' => 'range', 'confidence' => 0.8, 'w_grid' => 1.0, 'w_trend' => 0.1, 'w_liquidation' => 0.1,
+        'grid_mode' => 'long', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+    $brain->features['ADAUSDT'] = ['price' => 0.25, 'atr' => 0.005, 'ema20' => 0.25, 'ema20_1' => 0.25, 'last_closed_ts' => 1.0, 'vwap_4h' => 0.25];
+    $brain->features['XRPUSDT'] = ['price' => 1.5, 'atr' => 0.02, 'ema20' => 1.5, 'ema20_1' => 1.5, 'last_closed_ts' => 1.0, 'vwap_4h' => 1.5];
+    $brain->insights['ADAUSDT'] = $ins;
+    $brain->insights['XRPUSDT'] = $ins;
+    $ex = new PaperExchange(10000);
+    $w = new Worker(783, $ex, $market, $brain, Risk::profile('balanced'), ['ADAUSDT', 'XRPUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->step(6000.0);
+    check(isset($w->grids['ADAUSDT']) && !isset($w->grids['XRPUSDT']), 'из XRPUSDT/ADAUSDT (одна группа) сетка открылась только на первой по списку');
+});
 test('синхронизация клиентов с БД', function () {
     $market = new Market(['SOLUSDT']);
     $mgr = new Manager($market);
