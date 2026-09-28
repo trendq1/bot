@@ -244,6 +244,88 @@ test('Grid Safety: жёсткие признаки экстремальной в
     check(Indicators::isBreakout($breakout), 'ATR расширяется + всплеск объёма + крутой наклон EMA — пробой');
     check(!Indicators::isExtremeVolatility([]) && !Indicators::isBreakout([]), 'без данных (нет atr_pct_median) — не падает и не блокирует зря');
 });
+test('Мультитаймфрейм: подтверждение тренда старшего ТФ по склеенным свечам', function () {
+    check(Indicators::htfTrend([]) === null, 'нет истории — null, не блокирует');
+    check(Indicators::htfTrend(klines(60, 0.001)) === null, 'меньше 25 склеенных свечей (60/3=20) — null');
+    check(Indicators::htfTrend(klines(300, 0.002)) === 'up', 'устойчивый рост на 5м — 15м тоже вверх');
+    check(Indicators::htfTrend(klines(300, -0.002)) === 'down', 'устойчивое падение на 5м — 15м тоже вниз');
+    $r = Indicators::resample(klines(9), 3);
+    check(count($r) === 3 && (float)$r[0][2] >= (float)$r[0][1], '3 свечи по 3 склеились в 1 старшую, high ≥ open');
+});
+test('Мультитаймфрейм: сигнал по тренду 5м против явного направления 15м — не открывается', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 101.0;
+    $market->feeds['BTCUSDT']->klines = klines(300, -0.003);        // старший ТФ явно смотрит вниз
+    $brain = new Brain(new Learner());
+    $f = ['atr' => 1.0, 'price' => 101.0, 'ema20' => 100.5, 'ema20_1' => 100.4, 'low_5' => 100.3, 'c1' => 100.9, 'o1' => 100.5,
+        'h2' => 100.8, 'l2' => 100.0, 'rsi' => 58, 'low_10' => 99.5, 'high_10' => 102, 'high_5' => 101.5, 'last_closed_ts' => 1.0];
+    $brain->features['BTCUSDT'] = $f;
+    // сигнал на 5м — лонг (тренд вверх), но старший ТФ (свечи выше) явно падает
+    $brain->insights['BTCUSDT'] = ['regime' => 'trend_up', 'confidence' => 0.8, 'w_grid' => 0.0, 'w_trend' => 1.0, 'w_liquidation' => 0.0,
+        'grid_mode' => 'off', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 101.0]);
+    $w = new Worker(787, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->step(gmmktime(12, 0, 0));
+    check(!isset($w->directional['BTCUSDT']), 'лонг-сигнал 5м против явного даунтренда 15м — не открылся');
+});
+test('Funding: оценка funding за время удержания вычитается из PnL направленной сделки', function () use ($BTC) {
+    $run = function (float $fundingRate) use ($BTC) {
+        $market = new Market(['BTCUSDT']);
+        $market->instruments['BTCUSDT'] = $BTC;
+        $market->feeds['BTCUSDT']->price = 100000.0;
+        $market->feeds['BTCUSDT']->funding = $fundingRate;
+        $brain = new Brain(new Learner());
+        $ex = new PaperExchange(10000);
+        $ex->updatePrices(['BTCUSDT' => 100000.0]);
+        $ex->placeMarket('BTCUSDT', 'Buy', '0.1');
+        $ex->placeMarket('BTCUSDT', 'Sell', '0.1', null, null, true);
+        $recorded = null;
+        $w = new Worker(788, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+            function ($u, $t) use (&$recorded) { $recorded = $t; }, function ($u, $m) {}, function ($u, $e) {});
+        $openedMs = (int)(microtime(true) * 1000) - 16 * 3600 * 1000;   // держали 16 часов = 2 периода funding по 8ч
+        $w->directional['BTCUSDT'] = ['strategy' => 'trend', 'side' => 'Buy', 'entry' => 100000.0, 'stop' => 95000.0, 'qty' => 0.1,
+            'regime' => 'trend_up', 'opened_ms' => $openedMs, 'risk_usd' => 50.0];
+        $w->step(microtime(true));
+        return $recorded['pnl'];
+    };
+    $withoutFunding = $run(0.0);
+    $withFunding = $run(0.001);                            // 0.1% за период, лонг платит при положительной ставке
+    // notional 0.1×100000=10000, ставка 0.001, 2 периода (16ч/8ч) -> ожидаемый funding-костыль ≈ 10000×0.001×2 = 20$
+    check(near($withoutFunding - $withFunding, 20.0, 0.5), 'funding за 16ч удержания лонга вычтен из PnL (≈20$)');
+});
+test('Funding: оценка funding вычитается из PnL финального стопа сетки', function () {
+    $run = function (float $fundingRate) {
+        $sol = new Instrument('SOLUSDT', '0.01', '0.1', 0.1, 10000, 5, 50);
+        $market = new Market(['SOLUSDT']);
+        $market->instruments['SOLUSDT'] = $sol;
+        $market->feeds['SOLUSDT']->price = 100.0;
+        $market->feeds['SOLUSDT']->funding = $fundingRate;
+        $ex = new PaperExchange(10000);
+        $ex->updatePrices(['SOLUSDT' => 100.0]);
+        $plan = ['mode' => 'long', 'center' => 100.0, 'step_pct' => 0.5, 'levels' => 6, 'qty' => '1', 'max_loss' => 6.0];
+        $grid = new Grid($ex, 'SOLUSDT', $sol, $plan);
+        $grid->active = true;
+        $grid->startedAt = microtime(true) - 16 * 3600;         // держим инвентарь 16 часов = 2 периода funding
+        $grid->inventory = [1 => 100.0];
+        $ex->pos['SOLUSDT'] = ['size' => 1.0, 'entry' => 100.0, 'stop' => null, 'take' => null];
+        $brain = new Brain(new Learner());
+        $recorded = null;
+        $w = new Worker(789, $ex, $market, $brain, Risk::profile('balanced'), ['SOLUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+            function ($u, $t) use (&$recorded) { $recorded = $t; }, function ($u, $m) {}, function ($u, $e) {});
+        $ev = $grid->stop(100.0);                               // paper — событие сразу, цена не двигалась
+        $rm = new ReflectionMethod(Worker::class, 'onGridEvent');
+        $rm->setAccessible(true);
+        $rm->invoke($w, 'SOLUSDT', $grid, $ev, 'range', microtime(true));
+        return $recorded['pnl'];
+    };
+    $withoutFunding = $run(0.0);
+    $withFunding = $run(0.001);
+    // notional 1×100=100, ставка 0.001, 2 периода -> ожидаемый funding-костыль ≈ 100×0.001×2 = 0.2$
+    check(near($withoutFunding - $withFunding, 0.2, 0.02), 'funding за 16ч удержания сетки вычтен из PnL финального стопа');
+});
 test('тренд после отката', function () {
     $f = ['atr' => 1.0, 'price' => 101.0, 'ema20' => 100.5, 'ema20_1' => 100.4, 'low_5' => 100.3, 'c1' => 100.9, 'o1' => 100.5,
         'h2' => 100.8, 'l2' => 100.0, 'rsi' => 58, 'low_10' => 99.5, 'high_10' => 102, 'high_5' => 101.5];

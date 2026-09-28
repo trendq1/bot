@@ -30,6 +30,8 @@ final class Worker
     private const TRAIL_START_R = 1.5;
     private const TRAIL_DISTANCE_R = 0.6;
     private const PARTIAL_TAKE_R = 1.0;
+    /** Bybit рассчитывает funding раз в 8 часов — используется для грубой оценки funding за время удержания. */
+    private const FUNDING_INTERVAL_HOURS = 8.0;
 
     public RiskGuard $guard;
     /** @var array<string,Grid> */
@@ -133,6 +135,22 @@ final class Worker
         return $total;
     }
 
+    /**
+     * Грубая оценка funding за время удержания позиции: notional × текущая ставка × (часы удержания / 8).
+     * Реальный funding не входит ни в закрытые ордера, ни в closedPnl() биржи — это отдельный расчёт Bybit
+     * раз в 8 часов, и без отдельного похода в историю транзакций по каждой сделке точнее не посчитать.
+     * Знак: лонг платит при положительной ставке, шорт получает — стандартное правило перпетуалов.
+     */
+    private function fundingEstimate(string $sym, string $side, float $notional, float $holdSec): float
+    {
+        $rate = $this->market->feeds[$sym]->funding ?? 0.0;
+        if ($rate == 0.0 || $holdSec <= 0) {
+            return 0.0;
+        }
+        $periods = $holdSec / 3600 / self::FUNDING_INTERVAL_HOURS;
+        return $notional * $rate * $periods * ($side === 'Buy' ? 1 : -1);
+    }
+
     private function manageSymbol(string $sym, array $positions, bool $allowed, float $now): void
     {
         $feed = $this->market->feeds[$sym];
@@ -214,6 +232,15 @@ final class Worker
         if ($w['trend'] >= 0.5 && ($this->lastTrendBar[$sym] ?? null) !== $f['last_closed_ts']) {
             $this->lastTrendBar[$sym] = $f['last_closed_ts'];
             $setup = Setups::trend(['price' => $feed->price] + $f, $ins['regime'], (float)($tuning['trend_rr'] ?? $this->prof['rr']));
+            // Подтверждение старшим таймфреймом (15м): нет истории или там нет чёткого направления — не блокируем,
+            // но если 15м явно смотрит в другую сторону — пропускаем сигнал 5м, чтобы не ловить локальный шум.
+            if ($setup !== null) {
+                $htf = Indicators::htfTrend($feed->klines);
+                $wantUp = $setup['side'] === 'Buy';
+                if ($htf !== null && (($wantUp && $htf === 'down') || (!$wantUp && $htf === 'up'))) {
+                    $setup = null;
+                }
+            }
         }
         if ($setup === null && $w['liquidation'] >= 0.4 && $now - ($this->lastLiq[$sym] ?? 0) > self::LIQ_COOLDOWN_SEC) {
             $setup = Setups::liquidation($feed, $f, (float)($tuning['liq_threshold_mult'] ?? AIAnalyst::TUNABLE['liq_threshold_mult'][2]), $now);
@@ -256,11 +283,15 @@ final class Worker
     /** $kindOverride — точная причина выхода для аналитики (Grid Session PnL): cycle/stop/reversal; по умолчанию берётся из события сетки. */
     private function onGridEvent(string $sym, Grid $grid, array $ev, string $regime, float $now, ?string $kindOverride = null): void
     {
+        $pnl = $ev['pnl'];
         if ($ev['kind'] === 'stop') {
             $this->lastGridStop[$sym] = $now;                 // пауза перед новой сеткой на этой монете — см. GRID_STOP_COOLDOWN_SEC
+            // funding применяется только к финальному стопу (не к каждому мелкому циклу — те держатся слишком
+            // коротко, чтобы funding был заметен): оценка по времени с момента запуска этой сетки.
+            $pnl -= $this->fundingEstimate($sym, $ev['side'], $ev['qty'] * $ev['entry'], microtime(true) - $grid->startedAt);
         }
-        $this->recordTrade($sym, 'grid', $ev['side'], $ev['qty'], $ev['entry'], $ev['exit'], $ev['pnl'],
-            $ev['pnl'] / $grid->unitRisk(), $regime, $grid->tag, $kindOverride ?? $ev['kind']);
+        $this->recordTrade($sym, 'grid', $ev['side'], $ev['qty'], $ev['entry'], $ev['exit'], $pnl,
+            $pnl / $grid->unitRisk(), $regime, $grid->tag, $kindOverride ?? $ev['kind']);
     }
 
     /**
@@ -572,6 +603,7 @@ final class Worker
             $closed = $this->ex->closedPnl($sym, $d['opened_ms'] - 1000);
             $pnl = array_sum(array_column($closed, 'pnl'));
             $exit = $closed ? end($closed)['exit'] : $d['entry'];
+            $pnl -= $this->fundingEstimate($sym, $d['side'], $d['qty'] * $d['entry'], $now - $d['opened_ms'] / 1000);
             $r = $d['risk_usd'] ? $pnl / $d['risk_usd'] : 0.0;
             unset($this->directional[$sym]);
             if ($r < -1.3) {

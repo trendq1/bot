@@ -171,4 +171,49 @@ final class Indicators
         return ($f['atr_pct_median'] ?? 0) > 0 && $f['atr_pct'] > 1.8 * $f['atr_pct_median']
             && ($f['vol_ratio'] ?? 1.0) > 1.8 && abs($f['ema20_slope_pct'] ?? 0.0) > 0.15;
     }
+
+    /**
+     * Склеивает $factor соседних свечей в одну старшего таймфрейма (например, 3× 5м -> 15м).
+     * @param array $k свечи [ts, open, high, low, close, volume, turnover] от старых к новым
+     */
+    public static function resample(array $k, int $factor): array
+    {
+        $out = [];
+        $chunk = [];
+        foreach ($k as $row) {
+            $chunk[] = $row;
+            if (count($chunk) === $factor) {
+                $out[] = [$chunk[0][0], $chunk[0][1], max(array_column($chunk, 2)), min(array_column($chunk, 3)),
+                    end($chunk)[4], array_sum(array_column($chunk, 5)), array_sum(array_column($chunk, 6))];
+                $chunk = [];
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Подтверждение тренда со старшего таймфрейма (по умолчанию 15м = 3× 5м): EMA9 против EMA21 на склеенных
+     * свечах. null — данных недостаточно (мало истории) или таймфрейм сейчас без чёткого направления —
+     * это НЕ повод блокировать сигнал, а сигнал «подтверждения нет ни за, ни против».
+     * @return 'up'|'down'|null
+     */
+    public static function htfTrend(array $k5m, int $factor = 3): ?string
+    {
+        $htf = self::resample($k5m, $factor);
+        if (count($htf) < 25) {
+            return null;
+        }
+        $closes = array_map(fn($r) => (float)$r[4], $htf);
+        $ema9 = self::ema($closes, 9);
+        $ema21 = self::ema($closes, 21);
+        $e9 = end($ema9);
+        $e21 = end($ema21);
+        if ($e9 > $e21) {
+            return 'up';
+        }
+        if ($e9 < $e21) {
+            return 'down';
+        }
+        return null;
+    }
 }

@@ -129,6 +129,7 @@ function btRunPeriod(array $candles, int $from, int $to, string $symbol, Instrum
         }
         $price = (float)$candles[$i][4];
         $market->feeds[$symbol]->price = $price;
+        $market->feeds[$symbol]->klines = $window;         // нужно для подтверждения тренда старшим таймфреймом
         $ex->updatePrices([$symbol => $price]);
         $brain->features[$symbol] = $f;
         $brain->insights[$symbol] = AIAnalyst::ruleInsight($f, []);

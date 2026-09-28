@@ -29,6 +29,8 @@ final class Grid
      * @var array{side:string,qty:float,entry:float,since_ms:int}|null
      */
     public ?array $pendingStop = null;
+    /** Когда сетка запущена — для грубой оценки funding за время удержания инвентаря (см. Worker::fundingEstimate). */
+    public float $startedAt = 0.0;
 
     /** @param array{mode:string,center:float,step_pct:float,levels:int,qty:string,max_loss:float} $plan */
     public function __construct(private ExchangeInterface $ex, public string $symbol, private Instrument $inst, public array $plan)
@@ -98,6 +100,7 @@ final class Grid
             $this->place('open', $i, $this->levelPrice($i));
         }
         $this->active = true;
+        $this->startedAt = microtime(true);
     }
 
     /** @return list<array{kind:string,side:string,qty:float,entry:float,exit:float,pnl:float}> */
