@@ -8,6 +8,7 @@ use App\Crypto;
 use App\DB;
 use App\Engine\BybitExchange;
 use App\Engine\Risk;
+use App\Engine\Worker;
 use App\Env;
 use App\NowPayments;
 use App\Referral;
@@ -110,7 +111,7 @@ final class MiniApi
             'exchange' => $acc ? ['mode' => $acc['mode'], 'uid' => $acc['bybit_uid'], 'referral_ok' => (bool)$acc['referral_ok']] : null,
             'settings' => ['running' => $running, 'trading_mode' => $bs['trading_mode'], 'risk_profile' => $bs['risk_profile'],
                 'symbols' => json_decode((string)$bs['symbols'], true) ?: [], 'strategies' => json_decode((string)$bs['strategies'], true) ?: [],
-                'paper_balance' => round((float)$bs['paper_balance'], 2)],
+                'paper_balance' => round((float)$bs['paper_balance'], 2), 'budget_mult' => round((float)($bs['budget_mult'] ?? 1.0), 2)],
             'status' => $status,
             'live' => $live + ['equity' => $ws && $running ? (float)$ws['equity'] : null],
             'options' => [
@@ -118,6 +119,7 @@ final class MiniApi
                 'referral_link' => Settings::get('referral_link'), 'support' => Settings::get('support_contact'),
                 'maintenance' => Settings::get('maintenance'),
                 'crypto_pay' => (bool)Settings::get('nowpayments_enabled') && Settings::get('nowpayments_api_key') !== '',
+                'budget_mult_min' => Worker::BUDGET_MULT_MIN, 'budget_mult_max' => Worker::BUDGET_MULT_MAX,
             ],
         ];
     }
@@ -192,6 +194,9 @@ final class MiniApi
                 Api::fail(400, 'Включите хотя бы одну стратегию');
             }
             $upd['strategies'] = $st;
+        }
+        if (isset($b['budget_mult'])) {
+            $upd['budget_mult'] = max(Worker::BUDGET_MULT_MIN, min(Worker::BUDGET_MULT_MAX, (float)$b['budget_mult']));
         }
         if ($upd) {
             DB::update('bot_settings', $upd, 'user_id = :u', [':u' => $uid]);

@@ -8,7 +8,7 @@
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=11">
+  <link rel="stylesheet" href="styles.css?v=12">
 </head>
 <body>
   <div id="stars"></div>
@@ -168,6 +168,12 @@
         </div>
 
         <div class="card">
+          <div class="card-h"><h3 data-i18n="budget_mult_title">Бюджет на угоду</h3></div>
+          <p class="muted small" data-i18n="budget_mult_hint">Наскільки сильніше/слабше за замовчування профілю відкривати угоди. Не змінює співвідношення збиток/прибуток.</p>
+          <div id="budgetMult" class="chips"></div>
+        </div>
+
+        <div class="card">
           <div class="card-h"><h3 data-i18n="coins">Монети</h3><span class="muted small" data-i18n="up_to_8">до 8</span></div>
           <div id="coins" class="chips"></div>
         </div>
@@ -223,7 +229,7 @@
     <div class="toast" id="toast" hidden></div>
     <div class="tip" id="tip" hidden></div>
   </div>
-  <script src="i18n.js?v=11"></script>
-  <script src="app.js?v=11"></script>
+  <script src="i18n.js?v=12"></script>
+  <script src="app.js?v=12"></script>
 </body>
 </html>

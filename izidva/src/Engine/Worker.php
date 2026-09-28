@@ -32,6 +32,9 @@ final class Worker
     private const PARTIAL_TAKE_R = 1.0;
     /** Bybit рассчитывает funding раз в 8 часов — используется для грубой оценки funding за время удержания. */
     private const FUNDING_INTERVAL_HOURS = 8.0;
+    /** Границы клиентского множителя бюджета на сделку — скромный диапазон, чтобы не подрывать Risk Engine. */
+    public const BUDGET_MULT_MIN = 0.5;
+    public const BUDGET_MULT_MAX = 1.5;
 
     public RiskGuard $guard;
     /** @var array<string,Grid> */
@@ -74,9 +77,12 @@ final class Worker
         private $snapshot,
         public bool $manualMode = false,
         private $orderUpdate = null,
+        /** Клиентский множитель размера позиции/риска на открытие сделки (0.5–1.5) — поверх risk_mult ИИ и Adaptive Risk. */
+        public float $budgetMult = 1.0,
     ) {
         $this->symbols = array_values(array_filter($symbols, fn($s) => isset($market->feeds[$s])));
         $this->guard = new RiskGuard($prof);
+        $this->budgetMult = max(self::BUDGET_MULT_MIN, min(self::BUDGET_MULT_MAX, $this->budgetMult ?: 1.0));
     }
 
     public function step(float $now): void
@@ -258,7 +264,9 @@ final class Worker
         $inst = $this->market->instruments[$sym];
         $price = $this->market->feeds[$sym]->price;
         // Adaptive Risk: множитель ИИ дополнительно уменьшается, если есть просадка от пика equity.
-        $riskMult = $ins['risk_mult'] * $this->guard->adaptiveMult($this->equity);
+        // budgetMult — клиентский выбор (0.5–1.5), масштабирует и капитал, и риск-бюджет сделки пропорционально,
+        // не меняя соотношение убыток/прибыль сетки (Grid Risk Protection всё равно ограничит суммарный риск).
+        $riskMult = $ins['risk_mult'] * $this->guard->adaptiveMult($this->equity) * $this->budgetMult;
         $capital = $this->equity * $this->prof['grid_alloc'] / $this->prof['max_grids'] * $riskMult;
         $maxLoss = $this->equity * $this->prof['grid_max_loss_pct'] / 100 * $riskMult;
         // Grid Risk Protection: суммарный риск (max_loss) всех уже открытых сеток + новая не должны превышать
@@ -440,7 +448,7 @@ final class Worker
     private function openDirectional(string $sym, array $s, array $ins, float $weight): void
     {
         $inst = $this->market->instruments[$sym];
-        $riskMult = $ins['risk_mult'] * $this->guard->adaptiveMult($this->equity);
+        $riskMult = $ins['risk_mult'] * $this->guard->adaptiveMult($this->equity) * $this->budgetMult;
         $riskUsd = $this->equity * $this->prof['risk_pct'] / 100 * $riskMult * min(1.2, max(0.5, $weight));
         $qty = min($riskUsd / $s['risk'], $this->equity * $this->prof['leverage'] * 0.9 / $s['entry'], $inst->maxMktQty);
         $q = $inst->roundQty($qty);

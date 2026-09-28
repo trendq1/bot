@@ -439,7 +439,8 @@ function renderSettings() {
   const me = state.me; if (!me) return;
   const s = me.settings;
   const planTitle = { month: t("plan_month"), half_year: t("plan_half_year"), year: t("plan_year") };
-  state.draft = { trading_mode: s.trading_mode, risk_profile: s.risk_profile, symbols: [...s.symbols], strategies: { ...s.strategies } };
+  state.draft = { trading_mode: s.trading_mode, risk_profile: s.risk_profile, symbols: [...s.symbols], strategies: { ...s.strategies },
+    budget_mult: s.budget_mult };
   const d = state.draft;
   const seg = (id, val, attr = "v") => $(id).querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset[attr] === val));
   seg("modeSeg", d.trading_mode);
@@ -448,6 +449,14 @@ function renderSettings() {
     <b>${esc(p.title)}</b><div class="muted">${t("profile_desc", { risk: p.risk_pct, leverage: p.leverage, daily_loss: p.daily_loss_pct, grid_levels: p.grid_levels })}</div></div>`).join("");
   $("profiles").querySelectorAll(".profile").forEach((el) => el.addEventListener("click", () => {
     d.risk_profile = el.dataset.p; $("profiles").querySelectorAll(".profile").forEach((x) => x.classList.toggle("on", x === el)); haptic();
+  }));
+  const bmMin = me.options.budget_mult_min ?? 0.5, bmMax = me.options.budget_mult_max ?? 1.5;
+  const bmSteps = [bmMin, (bmMin + 1) / 2, 1, (bmMax + 1) / 2, bmMax].map((v) => Math.round(v * 100) / 100);
+  $("budgetMult").innerHTML = [...new Set(bmSteps)].map((v) =>
+    `<button class="chip ${Math.abs(v - d.budget_mult) < 0.01 ? "on" : ""}" data-v="${v}">${Math.round(v * 100)}%</button>`).join("");
+  $("budgetMult").querySelectorAll(".chip").forEach((el) => el.addEventListener("click", () => {
+    d.budget_mult = Number(el.dataset.v);
+    $("budgetMult").querySelectorAll(".chip").forEach((x) => x.classList.toggle("on", x === el)); haptic();
   }));
   $("coins").innerHTML = me.options.symbols.map((c) => `<button class="chip ${d.symbols.includes(c) ? "on" : ""}" data-c="${c}">${c.replace("USDT", "")}</button>`).join("");
   $("coins").querySelectorAll(".chip").forEach((el) => el.addEventListener("click", () => {

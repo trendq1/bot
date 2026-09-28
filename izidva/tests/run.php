@@ -523,6 +523,31 @@ test('клиент: сетка → сделка → обучение → ост�
     check(DB::row('SELECT * FROM worker_state WHERE user_id = 555') !== null, 'состояние опубликовано');
     check(DB::row('SELECT * FROM engine_status WHERE id = 1') === null || true, 'engine_status');
 });
+test('Budget Mult: клиентский множитель бюджета клэмпится в [0.5, 1.5] и масштабирует размер сетки', function () {
+    $sol = new Instrument('SOLUSDT', '0.01', '0.1', 0.1, 10000, 5, 50);
+    $run = function (float $budgetMult) use ($sol) {
+        $market = new Market(['SOLUSDT']);
+        $market->instruments['SOLUSDT'] = $sol;
+        $market->feeds['SOLUSDT']->price = 100.0;
+        $brain = new Brain(new Learner());
+        $brain->features['SOLUSDT'] = ['price' => 100.0, 'atr' => 1.0, 'ema20' => 100, 'ema20_1' => 100, 'last_closed_ts' => 1.0, 'vwap_4h' => 100];
+        $brain->insights['SOLUSDT'] = ['regime' => 'range', 'confidence' => 0.8, 'w_grid' => 1.0, 'w_trend' => 0.1, 'w_liquidation' => 0.1,
+            'grid_mode' => 'long', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+        $ex = new PaperExchange(10000);
+        $w = new Worker(790, $ex, $market, $brain, Risk::profile('balanced'), ['SOLUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+            function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {}, false, null, $budgetMult);
+        $w->step(9000.0);
+        return $w->grids['SOLUSDT']->plan ?? null;
+    };
+    $half = $run(0.5);
+    $normal = $run(1.0);
+    $max = $run(1.5);
+    $overshoot = $run(99.0);                                   // должно клэмпнуться к 1.5, как $max
+    check($half && $normal && $max, 'сетка открылась во всех случаях');
+    check(near((float)$half['max_loss'] / (float)$normal['max_loss'], 0.5, 0.01), 'при 0.5 риск сетки вдвое меньше базового');
+    check(near((float)$max['max_loss'] / (float)$normal['max_loss'], 1.5, 0.01), 'при 1.5 риск сетки в полтора раза больше базового');
+    check(near((float)$max['max_loss'], (float)$overshoot['max_loss'], 0.001), 'значение выше 1.5 клэмпится к 1.5, не берётся как есть');
+});
 test('после стопа сетки на монете есть пауза перед новым входом (GRID_STOP_COOLDOWN_SEC)', function () {
     $sol = new Instrument('SOLUSDT', '0.01', '0.1', 0.1, 10000, 5, 50);
     $market = new Market(['SOLUSDT']);

@@ -237,7 +237,7 @@ final class Manager
         $this->workers[$uid] = new Worker($uid, $ex, $this->market, $this->brain, Risk::profile($r['risk_profile']), $symbols,
             $strategies, fn($u, $t) => $this->recordTrade($u, $t), fn($u, $m) => $this->notify($u, $m),
             fn($u, $e) => $this->saveSnapshot($u, $e), (bool)($r['manual_mode'] ?? false),
-            fn($id, $status, $detail) => $this->updateManualOrder($id, $status, $detail));
+            fn($id, $status, $detail) => $this->updateManualOrder($id, $status, $detail), (float)($r['budget_mult'] ?? 1.0));
         Log::info("user $uid: запущен ({$r['trading_mode']}, {$r['risk_profile']}" . (($r['manual_mode'] ?? false) ? ', ручной режим' : '') . ')');
     }
 
