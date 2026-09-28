@@ -877,6 +877,27 @@ test('трейдер может закрыть открытую вручную �
     check($ex->positions() === [], 'позиция закрыта на бирже сразу');
     check(count($notes) === 2 && str_contains(end($notes), 'закрыл позицию'), 'клиент уведомлён о закрытии трейдером');
 });
+test('позиция, открытая прямо на бирже (мимо ручной торговли бота), тоже попадает в статистику', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 100000.0;
+    $brain = new Brain(new Learner());
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 100000.0]);
+    $recorded = null;
+    $w = new Worker(783, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) use (&$recorded) { $recorded = $t; }, function ($u, $m) {}, function ($u, $e) {});
+    $ex->placeMarket('BTCUSDT', 'Buy', '0.01');                // трейдер открыл сделку напрямую на бирже, Worker об этом не знает
+    check(!isset($w->directional['BTCUSDT']), 'Worker пока не в курсе позиции');
+    $w->step(microtime(true));
+    check(isset($w->directional['BTCUSDT']) && $w->directional['BTCUSDT']['strategy'] === 'manual', 'позиция взята под наблюдение при первом же такте');
+    $w->directional['BTCUSDT']['opened_ms'] -= 5000;           // «прошло» больше 3 секунд (грация checkDirectional)
+    $ex->updatePrices(['BTCUSDT' => 100000.0]);
+    $ex->placeMarket('BTCUSDT', 'Sell', '0.01', null, null, true);  // закрыл её тоже напрямую на бирже
+    $w->step(microtime(true));
+    check(!isset($w->directional['BTCUSDT']), 'закрытие замечено и снято с отслеживания');
+    check($recorded !== null && $recorded['symbol'] === 'BTCUSDT', 'сделка записана в статистику, хотя бот её не открывал');
+});
 test('трейдер может отменить неисполненный лимитный ордер кнопкой «Закрыть»', function () use ($BTC) {
     $market = new Market(['BTCUSDT']);
     $market->instruments['BTCUSDT'] = $BTC;

@@ -104,6 +104,7 @@ final class Worker
         $this->checkDirectional($positions, $now);
         $this->checkGridStops($now);
         $this->checkPendingManual($positions, $now);
+        $this->reconcileExternalPositions($positions, $now);
         foreach ($this->symbols as $sym) {
             $this->manageSymbol($sym, $positions, $allowed, $now);
         }
@@ -544,6 +545,26 @@ final class Worker
                 ($this->notify)($this->userId, "🖐 Лимитный ордер по $sym отменён биржей ({$r['status']})");
                 $this->reportOrder((int)$p['order_id'], 'cancelled', 'отменён биржей: ' . $r['status']);
             }
+        }
+    }
+
+    /**
+     * Позиция могла появиться на бирже без ведома Worker: трейдер открыл её прямо на Bybit (мимо ручной
+     * торговли бота), либо она уже была открыта, а демон перезапустился — $directional/$grids не хранятся
+     * между рестартами. Без этого такие позиции не попадают ни в directional, ни в grids, и checkDirectional()
+     * никогда не заметит их закрытие — сделка молча пропадает из статистики. Берём такую позицию под
+     * наблюдение (strategy=manual — бот её не трогает: без трейлинга/частичного тейка/принудительного
+     * закрытия по времени), стоп и риск неизвестны (r=0), но сумма и PnL в статистике будут настоящими.
+     */
+    private function reconcileExternalPositions(array $positions, float $now): void
+    {
+        foreach ($positions as $sym => $p) {
+            if (isset($this->directional[$sym]) || isset($this->grids[$sym]) || isset($this->pendingManual[$sym])) {
+                continue;
+            }
+            $this->directional[$sym] = ['strategy' => 'manual', 'side' => $p['side'], 'entry' => $p['entry'], 'stop' => 0.0,
+                'qty' => $p['qty'], 'regime' => 'external', 'opened_ms' => (int)($now * 1000), 'risk_usd' => 0.0];
+            Log::info("user {$this->userId}: $sym — позиция вне учёта бота (открыта напрямую на бирже или потеряна после рестарта), взята под наблюдение для статистики");
         }
     }
 
