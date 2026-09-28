@@ -23,6 +23,12 @@ final class Grid
     public array $inventory = [];
     public bool $active = false;
     public bool $draining = false;
+    /**
+     * Стоп на реальной бирже отправлен, но точная цена исполнения ещё не известна (см. stop()) —
+     * PnL посчитает Worker::checkGridStops() на следующих тактах по факту с биржи.
+     * @var array{side:string,qty:float,entry:float,since_ms:int}|null
+     */
+    public ?array $pendingStop = null;
 
     /** @param array{mode:string,center:float,step_pct:float,levels:int,qty:string,max_loss:float} $plan */
     public function __construct(private ExchangeInterface $ex, public string $symbol, private Instrument $inst, public array $plan)
@@ -161,7 +167,14 @@ final class Grid
         }
     }
 
-    /** Жёсткая остановка: отмена ордеров и закрытие позиции по рынку. */
+    /**
+     * Жёсткая остановка: отмена ордеров и закрытие позиции по рынку.
+     * На бумажном счёте цена исполнения известна сразу (см. PaperExchange) — событие возвращается тут же.
+     * На реальной бирже маркет-ордер исполняется не мгновенно, и цена ДО его отправки (аргумент $price) может
+     * не совпасть с фактическим филлом при проскальзывании — используя её, легко занизить реальный убыток
+     * в статистике и в обучении (Learner). Поэтому для live/demo только отправляем закрытие и запоминаем
+     * pendingStop — реальный PnL по факту с биржи досчитает Worker::checkGridStops() на следующих тактах.
+     */
     public function stop(float $price): ?array
     {
         $this->ex->cancelAll($this->symbol);
@@ -177,9 +190,19 @@ final class Grid
         if (!$closed) {
             return null;
         }
-        $exit = $this->ex->mode() === 'paper' ? $closed[0] : $price;
-        $pnl = $this->dir() * ($exit - $entry) * $qty - $entry * $qty * ExchangeInterface::MAKER_FEE - $exit * $qty * ExchangeInterface::TAKER_FEE;
-        return ['kind' => 'stop', 'side' => $this->openSide(), 'qty' => $qty, 'entry' => $entry, 'exit' => $exit, 'pnl' => $pnl];
+        if ($this->ex->mode() !== 'paper') {
+            $this->pendingStop = ['side' => $this->openSide(), 'qty' => $qty, 'entry' => $entry, 'since_ms' => (int)(microtime(true) * 1000)];
+            return null;
+        }
+        $exit = $closed[0];
+        return ['kind' => 'stop', 'side' => $this->openSide(), 'qty' => $qty, 'entry' => $entry, 'exit' => $exit,
+            'pnl' => $this->stopPnl($entry, $exit, $qty)];
+    }
+
+    /** Формула PnL стопа: вход был лимитным ордером (maker), закрытие — маркет-ордером (taker). */
+    public function stopPnl(float $entry, float $exit, float $qty): float
+    {
+        return $this->dir() * ($exit - $entry) * $qty - $entry * $qty * ExchangeInterface::MAKER_FEE - $exit * $qty * ExchangeInterface::TAKER_FEE;
     }
 
     /** Позиции нет, а цена ушла от центра против сетки — пора перестроить её вокруг новой цены. */
@@ -192,5 +215,16 @@ final class Grid
     public function unitRisk(): float
     {
         return max($this->plan['max_loss'] / $this->plan['levels'], 1e-9);
+    }
+
+    /** Незафиксированный результат по уже открытым уровням при текущей цене (для решения о досрочном выходе). */
+    public function floatingPnl(float $price): float
+    {
+        $qty = (float)$this->plan['qty'];
+        $pnl = 0.0;
+        foreach ($this->inventory as $entry) {
+            $pnl += $this->dir() * ($price - $entry) * $qty;
+        }
+        return $pnl;
     }
 }

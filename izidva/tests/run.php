@@ -22,6 +22,7 @@ use App\DB;
 use App\Engine\AIAnalyst;
 use App\Engine\Brain;
 use App\Engine\ChartRenderer;
+use App\Engine\ExchangeInterface;
 use App\Engine\Grid;
 use App\Engine\Indicators;
 use App\Engine\Instrument;
@@ -64,6 +65,28 @@ function test(string $name, callable $fn): void
         $failed[] = "$name: " . $e->getMessage() . ' @ ' . basename($e->getFile()) . ':' . $e->getLine();
         echo "  ✗ $name\n";
     }
+}
+
+/** Заглушка реальной биржи (mode() !== 'paper') — для проверки пути Grid::stop()/Worker::checkGridStops(). */
+final class FakeLiveExchange implements ExchangeInterface
+{
+    /** symbol => очередь ответов closedPnl() */
+    public array $closedPnlQueue = [];
+
+    public function mode(): string { return 'live'; }
+    public function equity(): float { return 1000.0; }
+    public function positions(): array { return []; }
+    public function setLeverage(string $symbol, int $leverage): void {}
+    public function placeLimit(string $symbol, string $side, string $qty, string $price, string $linkId, bool $reduceOnly = false,
+                               ?string $stop = null, ?string $take = null): void {}
+    public function placeMarket(string $symbol, string $side, string $qty, ?string $stop = null, ?string $take = null, bool $reduceOnly = false): void {}
+    public function setStopLoss(string $symbol, string $stop): void {}
+    public function cancel(string $symbol, string $linkId): void {}
+    public function cancelAll(string $symbol): void {}
+    public function openOrderIds(string $symbol): array { return []; }
+    public function orderResult(string $symbol, string $linkId): array { return ['status' => 'Unknown', 'avg_price' => 0.0, 'filled_qty' => 0.0]; }
+    public function closedPnl(string $symbol, int $sinceMs): array { return $this->closedPnlQueue[$symbol] ?? []; }
+    public function closePosition(string $symbol): ?array { return [0.0, 0.0]; }
 }
 
 $BTC = new Instrument('BTCUSDT', '0.1', '0.001', 0.001, 100, 5, 100);
@@ -398,6 +421,62 @@ test('коррелирующие монеты: вторую сетку в той
         function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
     $w->step(6000.0);
     check(isset($w->grids['ADAUSDT']) && !isset($w->grids['XRPUSDT']), 'из XRPUSDT/ADAUSDT (одна группа) сетка открылась только на первой по списку');
+});
+test('стоп сетки на реальной бирже: PnL считается по факту с биржи, а не по цене до отправки ордера', function () {
+    $sol = new Instrument('SOLUSDT', '0.01', '0.1', 0.1, 10000, 5, 50);
+    $market = new Market(['SOLUSDT']);
+    $market->instruments['SOLUSDT'] = $sol;
+    $market->feeds['SOLUSDT']->price = 100.0;
+    $ex = new FakeLiveExchange();
+    $plan = ['mode' => 'long', 'center' => 100.0, 'step_pct' => 0.5, 'levels' => 6, 'qty' => '1', 'max_loss' => 6.0];
+    $grid = new Grid($ex, 'SOLUSDT', $sol, $plan);
+    $grid->active = true;
+    $grid->inventory = [1 => 99.5];                           // один уровень уже куплен по 99.5
+    $ev = $grid->stop(90.0);                                   // 90.0 — только снимок цены ДО отправки ордера
+    check($ev === null, 'на реальной бирже событие не возвращается сразу — ждём факта исполнения');
+    check($grid->pendingStop !== null && near((float)$grid->pendingStop['entry'], 99.5), 'pendingStop записан с верным входом');
+
+    $brain = new Brain(new Learner());
+    $brain->insights['SOLUSDT'] = ['regime' => 'trend_down'];
+    $recorded = null;
+    $w = new Worker(791, $ex, $market, $brain, Risk::profile('balanced'), ['SOLUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) use (&$recorded) { $recorded = $t; }, function ($u, $m) {}, function ($u, $e) {});
+    $w->grids['SOLUSDT'] = $grid;
+    $t0 = microtime(true);
+    $w->step($t0);
+    check(isset($w->grids['SOLUSDT']) && $recorded === null, 'сразу после стопа сделка ещё не записана — ждём биржу');
+    $ex->closedPnlQueue['SOLUSDT'] = [['pnl' => -3.21, 'exit' => 88.4, 'ts' => 1]];
+    $w->step($t0 + 4);
+    check(!isset($w->grids['SOLUSDT']), 'после ответа биржи сетка убрана из активных');
+    check($recorded !== null && near((float)$recorded['pnl'], -3.21) && near((float)$recorded['exit'], 88.4),
+        'записан реальный PnL и цена исполнения с биржи (-3.21$ / 88.4), а не оценка по старой цене (90.0)');
+});
+test('досрочный выход из сетки при настоящем развороте режима, если уже есть плавающий убыток', function () {
+    $sol = new Instrument('SOLUSDT', '0.01', '0.1', 0.1, 10000, 5, 50);
+    $market = new Market(['SOLUSDT']);
+    $market->instruments['SOLUSDT'] = $sol;
+    // 98.0: ниже входа (99.5) — уже плавающий убыток, но ЕЩЁ выше собственного stopPrice сетки (96.25) —
+    // чтобы сработала именно новая логика разворота, а не старый «цена дошла до stopPrice» в sync().
+    $market->feeds['SOLUSDT']->price = 98.0;
+    $brain = new Brain(new Learner());
+    $brain->features['SOLUSDT'] = ['price' => 98.0, 'atr' => 1.0, 'ema20' => 98, 'ema20_1' => 98, 'last_closed_ts' => 1.0, 'vwap_4h' => 98];
+    $brain->insights['SOLUSDT'] = ['regime' => 'trend_down', 'confidence' => 0.8, 'w_grid' => 0.1, 'w_trend' => 0.9, 'w_liquidation' => 0.1,
+        'grid_mode' => 'short', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'ai'];
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['SOLUSDT' => 98.0]);
+    $plan = ['mode' => 'long', 'center' => 100.0, 'step_pct' => 0.5, 'levels' => 6, 'qty' => '1', 'max_loss' => 6.0];
+    $grid = new Grid($ex, 'SOLUSDT', $sol, $plan);
+    $grid->active = true;
+    $grid->inventory = [1 => 99.5];                           // long-сетка держит уровень, купленный по 99.5 — при 98.0 это убыток
+    $ex->pos['SOLUSDT'] = ['size' => 1.0, 'entry' => 99.5, 'stop' => null, 'take' => null];
+    $recorded = null;
+    $w = new Worker(793, $ex, $market, $brain, Risk::profile('balanced'), ['SOLUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) use (&$recorded) { $recorded = $t; }, function ($u, $m) {}, function ($u, $e) {});
+    $w->grids['SOLUSDT'] = $grid;
+    $w->step(microtime(true));
+    check($recorded !== null && $recorded['strategy'] === 'grid' && (float)$recorded['pnl'] < 0,
+        'режим развернулся против long-сетки (стал short), сетка уже в минусе — закрыта сразу, а не через drain()');
+    check(!isset($w->grids['SOLUSDT']), 'сетка убрана из активных сразу');
 });
 test('синхронизация клиентов с БД', function () {
     $market = new Market(['SOLUSDT']);

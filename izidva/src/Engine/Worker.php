@@ -87,6 +87,7 @@ final class Worker
         [$allowed, $reason] = $this->guard->allowed($this->equity, $now);
         $positions = $this->ex->positions();
         $this->checkDirectional($positions, $now);
+        $this->checkGridStops($now);
         $this->checkPendingManual($positions, $now);
         foreach ($this->symbols as $sym) {
             $this->manageSymbol($sym, $positions, $allowed, $now);
@@ -134,12 +135,22 @@ final class Worker
             }
             $want = $allowed && $ins['grid_mode'] === $grid->plan['mode'] && $w['grid'] >= 0.4;
             if ($grid->active && !$grid->draining && !$want) {
-                $grid->drain();
+                // Настоящий разворот (не просто просевший вес) и уже плавающий убыток — закрываем сразу,
+                // не дожидаясь полного стопа сетки: то же самое, что checkReversal() делает для направленных сделок.
+                $reversed = in_array($ins['grid_mode'], ['long', 'short'], true) && $ins['grid_mode'] !== $grid->plan['mode'];
+                if ($reversed && $grid->floatingPnl($feed->price) < 0) {
+                    $ev = $grid->stop($feed->price);
+                    if ($ev) {
+                        $this->onGridEvent($sym, $grid, $ev, $ins['regime'], $now);
+                    }
+                } else {
+                    $grid->drain();
+                }
             } elseif ($grid->active && $grid->idleFar($feed->price)) {
                 $grid->stop($feed->price);
             }
-            if (!$grid->active) {
-                unset($this->grids[$sym]);
+            if (!$grid->active && $grid->pendingStop === null) {
+                unset($this->grids[$sym]);                   // пока не заберём реальный PnL стопа (см. checkGridStops) — не освобождаем монету
             }
             return;
         }
@@ -525,6 +536,42 @@ final class Worker
                     $this->userId, $sym, $d['strategy'], $r, self::fmt($d['entry']), self::fmt($d['stop']), self::fmt($exit), self::fmt($d['qty'])));
             }
             $this->recordTrade($sym, $d['strategy'], $d['side'], $d['qty'], $d['entry'], $exit, $pnl, $r, $d['regime']);
+        }
+    }
+
+    /**
+     * Забираем реальный PnL стопов сетки на реальной бирже (см. Grid::stop()) — сама сделка (маркет-ордер на
+     * закрытие) уже отправлена, ждём, пока Bybit отразит её в /v5/position/closed-pnl, чтобы посчитать PnL
+     * по фактической цене исполнения, а не по цене ДО отправки ордера (там может быть проскальзывание).
+     */
+    private function checkGridStops(float $now): void
+    {
+        $nowMs = (int)($now * 1000);
+        foreach ($this->grids as $sym => $grid) {
+            $p = $grid->pendingStop;
+            if ($p === null) {
+                continue;
+            }
+            if ($nowMs - $p['since_ms'] < 3000) {
+                continue;                                      // даём бирже время провести маркет-ордер
+            }
+            $closed = $this->ex->closedPnl($sym, $p['since_ms'] - 1000);
+            if (!$closed && $nowMs - $p['since_ms'] < 60_000) {
+                continue;                                      // ещё не отразилось в истории биржи — проверим на следующем такте
+            }
+            if ($closed) {
+                $pnl = array_sum(array_column($closed, 'pnl'));
+                $exit = (float)end($closed)['exit'];
+            } else {
+                // биржа не ответила за минуту — не теряем сделку из статистики, считаем по последней известной цене
+                $exit = $this->market->feeds[$sym]->price ?: $p['entry'];
+                $pnl = $grid->stopPnl($p['entry'], $exit, $p['qty']);
+                Log::warn("user {$this->userId}: $sym стоп сетки — не дождались closedPnl с биржи за минуту, PnL оценён по последней цене");
+            }
+            $grid->pendingStop = null;
+            unset($this->grids[$sym]);
+            $this->onGridEvent($sym, $grid, ['kind' => 'stop', 'side' => $p['side'], 'qty' => $p['qty'], 'entry' => $p['entry'],
+                'exit' => $exit, 'pnl' => $pnl], $this->brain->insights[$sym]['regime'] ?? 'range', $now);
         }
     }
 
