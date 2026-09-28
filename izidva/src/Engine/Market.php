@@ -157,6 +157,43 @@ final class Market
         }
     }
 
+    /**
+     * Ручные сделки трейдера не привязаны к curated-списку монет (Settings::get('symbols')) — агент их не
+     * анализирует, поэтому им не нужны свечи/фичи/WS-ликвидации, только спецификация инструмента и текущая
+     * цена. Если монеты ещё нет в $feeds/$instruments — подгружает разово с Bybit; в $symbols НЕ добавляет,
+     * чтобы Market::tick() не тратил на неё бюджет обновления свечей вместе с монетами для автостратегий.
+     */
+    public function ensureSymbol(string $sym): bool
+    {
+        if (!isset($this->feeds[$sym])) {
+            $this->feeds[$sym] = new SymbolFeed($sym);
+        }
+        if (!isset($this->instruments[$sym])) {
+            try {
+                $r = $this->api->get('/v5/market/instruments-info', ['category' => 'linear', 'symbol' => $sym]);
+                if (empty($r['list'][0])) {
+                    return false;
+                }
+                $this->instruments[$sym] = Instrument::fromBybit($r['list'][0]);
+            } catch (\Throwable $e) {
+                Log::warn("$sym: инструмент не загрузился (ручной ордер): " . $e->getMessage());
+                return false;
+            }
+        }
+        if (!$this->feeds[$sym]->price) {
+            try {
+                $r = $this->api->get('/v5/market/tickers', ['category' => 'linear', 'symbol' => $sym]);
+                $last = $r['list'][0]['lastPrice'] ?? null;
+                if ($last) {
+                    $this->feeds[$sym]->addPrice((float)$last, microtime(true));
+                }
+            } catch (\Throwable $e) {
+                Log::warn("$sym: цена не загрузилась (ручной ордер): " . $e->getMessage());
+            }
+        }
+        return isset($this->instruments[$sym]) && (bool)$this->feeds[$sym]->price;
+    }
+
     public function prices(): array
     {
         $out = [];

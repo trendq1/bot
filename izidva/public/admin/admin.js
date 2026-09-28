@@ -446,7 +446,7 @@ VIEWS.manual = async () => {
       <h3>Новый ордер</h3>
       <label class="row" style="gap:8px"><input type="checkbox" id="mnAll" style="width:auto"> <b>Открыть сразу всем клиентам</b> <span class="muted small">(один и тот же ордер каждому)</span></label>
       <div class="grid2">
-        <label>Монета<select id="mnSymbol"></select></label>
+        <label>Монета<input class="inp" id="mnSymbol" list="mnSymbolList" placeholder="BTCUSDT" style="text-transform:uppercase"><datalist id="mnSymbolList"></datalist></label>
         <label>Текущая цена<div class="row"><input class="inp" id="mnPrice0" readonly placeholder="—"><button class="btn" type="button" id="mnRefreshPrice">↻</button></div></label>
       </div>
       <div class="seg" id="mnSide"><button data-v="Buy">🟢 Buy / Long</button><button data-v="Sell">🔴 Sell / Short</button></div>
@@ -466,7 +466,8 @@ VIEWS.manual = async () => {
   const POS_LABEL = { grid: "Сетка", position: "Позиция", pending: "Лимит (ждёт)" };
   function renderInfo() {
     const c = client();
-    $("mnSymbol").innerHTML = c.symbols.map((s) => `<option value="${s}">${s}</option>`).join("");
+    $("mnSymbolList").innerHTML = c.symbols.map((s) => `<option value="${s}">`).join("");
+    if (!$("mnSymbol").value) { $("mnSymbol").value = c.symbols[0] || ""; }
     $("mnInfo").innerHTML = `Режим: <b>${c.manual_mode ? "ручной (автотрейдинг выключен)" : "автотрейдинг"}</b> · бот ${c.running ? "работает" : "остановлен"}` +
       (c.equity != null ? ` · баланс ${usd(c.equity)}` : "") + (c.status ? ` · ${esc(c.status)}` : "");
     $("mnToggle").textContent = c.manual_mode ? "▶ Включить автотрейдинг" : "✋ Выключить автотрейдинг (ручной режим)";
@@ -487,7 +488,7 @@ VIEWS.manual = async () => {
     b.onclick = () => { $("mnType").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b)); $("mnPriceWrap").hidden = b.dataset.v !== "limit"; };
   });
   $("mnRefreshPrice").onclick = async () => {
-    try { const r = await api("/manual/price?symbol=" + $("mnSymbol").value); $("mnPrice0").value = r.price; } catch (e) { toast(e.message); }
+    try { const r = await api("/manual/price?symbol=" + $("mnSymbol").value.trim().toUpperCase()); $("mnPrice0").value = r.price; } catch (e) { toast(e.message); }
   };
   $("mnSend").onclick = async () => {
     const c = client();
@@ -497,7 +498,7 @@ VIEWS.manual = async () => {
     const qty = Number($("mnQty").value);
     if (!qty || qty <= 0) { toast("Укажите объём"); return; }
     if (type === "limit" && !Number($("mnLimitPrice").value)) { toast("Укажите цену лимитного ордера"); return; }
-    const body = { symbol: $("mnSymbol").value, side, order_type: type, qty,
+    const body = { symbol: $("mnSymbol").value.trim().toUpperCase(), side, order_type: type, qty,
       price: type === "limit" ? Number($("mnLimitPrice").value) : null,
       stop_loss: $("mnSl").value || null, take_profit: $("mnTp").value || null, leverage: $("mnLev").value || null };
     const question = all

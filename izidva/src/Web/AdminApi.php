@@ -847,8 +847,8 @@ final class AdminApi
     private static function manualPrice(string $symbol): array
     {
         $symbol = strtoupper(trim($symbol));
-        if (!in_array($symbol, Settings::get('symbols'), true)) {
-            Api::fail(400, 'Неизвестная монета');
+        if (!preg_match('/^[A-Z0-9]{2,15}USDT$/', $symbol)) {
+            Api::fail(400, 'Похоже, это не тикер USDT-перпетуала Bybit (например, BTCUSDT)');
         }
         try {
             $r = (new \App\Bybit())->get('/v5/market/tickers', ['category' => 'linear', 'symbol' => $symbol]);
@@ -862,8 +862,8 @@ final class AdminApi
     private static function manualValidate(array $b): array
     {
         $symbol = strtoupper(trim((string)($b['symbol'] ?? '')));
-        if (!in_array($symbol, Settings::get('symbols'), true)) {
-            Api::fail(400, 'Неизвестная монета');
+        if (!preg_match('/^[A-Z0-9]{2,15}USDT$/', $symbol)) {
+            Api::fail(400, 'Похоже, это не тикер USDT-перпетуала Bybit (например, BTCUSDT)');
         }
         $side = in_array($b['side'] ?? '', ['Buy', 'Sell'], true) ? $b['side'] : null;
         if (!$side) {

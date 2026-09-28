@@ -472,8 +472,10 @@ final class Worker
     public function manualOrder(array $o): array
     {
         $sym = (string)$o['symbol'];
-        if (!in_array($sym, $this->symbols, true) || !isset($this->market->instruments[$sym])) {
-            throw new \RuntimeException("монета $sym недоступна для этого клиента");
+        // Ручные сделки не ограничены символами автостратегий клиента — агент их не анализирует, трейдер
+        // выбирает монету сам; Market лениво подгружает инструмент+цену для любой реальной монеты Bybit.
+        if (!$this->market->ensureSymbol($sym)) {
+            throw new \RuntimeException("монета $sym не найдена на Bybit (фьючерсы) или сейчас недоступна");
         }
         if (isset($this->grids[$sym]) || isset($this->directional[$sym]) || isset($this->pendingManual[$sym])) {
             throw new \RuntimeException("по $sym уже есть открытая позиция, сетка или неисполненный ордер");
