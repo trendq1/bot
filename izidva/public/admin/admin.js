@@ -530,6 +530,148 @@ VIEWS.orders = async () => {
   ordTimer = setInterval(() => { if (current === "orders" && $("modal").hidden) load().catch(() => {}); }, 5000);
 };
 
+// ───────────── сигналы из Telegram ─────────────
+const SIG_STATUS = { new: ["в очереди", "warn"], processed: ["исполнен", "ok"], rejected: ["отклонён", "bad"], duplicate: ["дубль", ""], ignored: ["не распознан", ""] };
+const PARSER_FIELDS = [["long_words", "Слова «лонг»"], ["short_words", "Слова «шорт»"], ["entry_words", "Слова «вход/диапазон»"], ["target_words", "Слова «цель/тейк»"],
+  ["stop_words", "Слова «стоп»"], ["close_words", "Обновление: «закрыть»"], ["be_words", "Обновление: «безубыток»"]];
+const EX_KIND = { signal: "сигнал", update: "обновление", noise: "не сигнал" };
+VIEWS.signals = async () => {
+  let d = await api("/signals/overview");
+  const fmtRes = (r) => {
+    if (r.type === "signal") {
+      const s = r.signal;
+      return `<div class="note ${r.ok ? "" : "err"}"><b>${r.ok ? "✅ Сигнал распознан" : "⚠️ Распознан, но не пройдёт проверку"}</b>${r.error ? ": " + esc(r.error) : ""}<br>
+        ${esc(s.symbol)} · ${s.side === "Buy" ? "LONG" : "SHORT"} · вход ${s.entry_lo}–${s.entry_hi} · стоп ${s.stop} · цели: ${s.targets.map(esc).join(", ") || "—"}${s.leverage ? " · плечо канала X" + s.leverage + " (не используется)" : ""}</div>`;
+    }
+    if (r.type === "update") return `<div class="note"><b>📝 Обновление</b>: ${esc(r.update.symbol)} → ${r.update.action === "close" ? "закрыть сделку" : "стоп в безубыток"}</div>`;
+    return `<div class="note err"><b>Не распознано</b>: ${esc(r.error)}${r.symbol ? " (монета найдена: " + esc(r.symbol) + ", не хватает остального)" : " (монета не найдена)"}</div>`;
+  };
+  const chLabel = (c) => c.pending ? `<span class="tag warn">ожидает подтверждения</span>` : c.enabled ? `<span class="tag ok">включён</span>` : `<span class="tag">выключен</span>`;
+  const draw = () => {
+    const s = d.settings;
+    $("view").innerHTML = `
+      <div class="card">
+        <h3>Приём сигналов</h3>
+        <div class="muted small" style="margin-bottom:10px">Как сигнал попадает в бота: ① админ пересылает пост боту в личку; ② бот добавлен админом в ваш канал и видит посты; ③ внешний ридер (отдельный аккаунт, читающий каналы) шлёт посты на адрес ниже. Каждый источник — «канал» со своими настройками.</div>
+        <div class="row" style="gap:18px;flex-wrap:wrap">
+          <label class="row" style="gap:8px"><input type="checkbox" id="sgEn" style="width:auto" ${s.signal_enabled ? "checked" : ""}> <b>Приём сигналов включён</b></label>
+          <label class="row" style="gap:8px"><input type="checkbox" id="sgReal" style="width:auto" ${s.signal_real_enabled ? "checked" : ""}> Разрешить РЕАЛЬНЫЕ счета <span class="muted small">(ещё и в настройках канала)</span></label>
+          <label style="max-width:220px">Допуск ухода цены от входа, %<input class="inp" id="sgChase" type="number" step="0.05" min="0" max="5" value="${s.signal_max_chase_pct}"></label>
+          <button class="btn primary" id="sgSave">Сохранить</button>
+        </div>
+        ${d.legacy_ids.length ? `<div class="muted small" style="margin-top:8px">Старый список разрешённых ID из «Настроек»: ${d.legacy_ids.map(esc).join(", ")} — продолжает работать.</div>` : ""}
+      </div>
+      <div class="card">
+        <div class="row" style="justify-content:space-between"><h3 style="margin:0">Каналы-источники</h3><button class="btn primary" id="chNew">+ Добавить канал</button></div>
+        ${table(["Канал", "Ключ", "Статус", "Режим", "Риск ×", "Постов", "Последний", "Сигналы", "Сделки клиентов", ""], d.channels.map((c) => {
+          const n = c.counts;
+          return `<tr class="${c.pending ? "hl" : ""}"><td><b>${esc(c.name)}</b>${c.notes ? `<div class="muted small">${esc(c.notes)}</div>` : ""}</td><td class="small">${esc(c.source_key)}</td><td>${chLabel(c)}</td>
+            <td>${c.mode === "real" ? '<span class="tag bad">реал</span>' : '<span class="tag">демо</span>'}</td><td class="num">${c.risk_mult}</td><td class="num">${c.posts_seen}</td><td>${dt(c.last_post_at)}</td>
+            <td class="small" style="white-space:nowrap" title="исполнено / отклонено / дубли">✓ ${n.processed || 0} · ✗ ${n.rejected || 0} · ♻ ${n.duplicate || 0}</td>
+            <td class="small">${c.stats.trades ? `${c.stats.trades} сд. · <span class="${cls(c.stats.net_pnl)}">${usd(c.stats.net_pnl, true)}</span> · PF ${c.stats.profit_factor ?? "—"}` : "—"}</td>
+            <td style="white-space:nowrap"><button class="btn" data-edit="${c.id}">⚙ Настроить</button> <button class="btn" data-tog="${c.id}">${c.enabled ? "Выключить" : "Включить"}</button></td></tr>`;
+        }))}
+        <div class="muted small" style="margin-top:8px">Новый канал из пересылки или поста появляется здесь <b>выключенным</b> — проверьте разбор на примерах и включите. Режим «демо» — сигналы идут только на демо-счета клиентов.</div>
+      </div>
+      <div class="card">
+        <h3>Админы сигналов</h3>
+        <div class="muted small" style="margin-bottom:8px">Кому разрешено пересылать посты боту. Человек узнаёт свой Telegram ID, написав боту команду <code>/id</code>.</div>
+        ${table(["Telegram ID", "Имя", "Статус", ""], d.admins.map((a) => `<tr><td class="num">${esc(a.tg_id)}</td><td>${esc(a.name)}</td><td>${a.enabled ? '<span class="tag ok">активен</span>' : '<span class="tag">выключен</span>'}</td>
+          <td style="white-space:nowrap"><button class="btn" data-atog="${a.id}" data-en="${a.enabled ? 0 : 1}">${a.enabled ? "Выключить" : "Включить"}</button> <button class="btn danger" data-adel="${a.id}">✕</button></td></tr>`))}
+        <div class="row" style="margin-top:10px"><input class="inp" id="adTg" placeholder="Telegram ID (число)" inputmode="numeric"><input class="inp" id="adName" placeholder="Имя (для себя)"><button class="btn primary" id="adAdd">Добавить админа</button></div>
+      </div>
+      <div class="card">
+        <h3>Проверка разбора</h3>
+        <div class="muted small" style="margin-bottom:8px">Вставьте пост — бот покажет, что он в нём увидит, и ничего не откроет.</div>
+        <div class="row"><select id="pgCh" style="max-width:320px"><option value="0">Настройки по умолчанию</option>${d.channels.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select></div>
+        <textarea id="pgText" rows="6" placeholder="Вставьте текст поста" style="margin-top:8px"></textarea>
+        <button class="btn primary" id="pgGo" style="margin-top:8px">Проверить</button><div id="pgOut" style="margin-top:8px"></div>
+      </div>
+      <div class="card">
+        <h3>Внешний ридер (отдельный аккаунт в каналах)</h3>
+        <div class="muted small" style="margin-bottom:8px">Скрипт на отдельном аккаунте читает посты каналов и шлёт их сюда. Канал определяется по <code>channel_id</code>; неизвестный создаётся выключенным. Работает, когда приём включён.</div>
+        <div class="kv small"><div>Адрес: <code>POST ${esc(location.origin)}${esc(d.ingest.path)}</code></div><div>Заголовок: <code>X-Signal-Token: <span id="igTok">${esc(d.ingest.token)}</span></code></div>
+        <div>Тело JSON: <code>{"channel_id":"-1001234567890","channel_name":"Название","text":"…пост…"}</code></div></div>
+        <button class="btn" id="igRot" style="margin-top:8px">Сменить токен</button>
+      </div>
+      <div class="card">
+        <h3>Журнал сигналов</h3>
+        ${table(["#", "Когда", "Канал", "Что", "Статус", "Итог"], d.recent.map((r) => {
+          const st = SIG_STATUS[r.status] || [r.status, ""];
+          const what = r.kind === "update" ? `📝 ${esc(r.symbol)} → ${r.action === "close" ? "закрыть" : "безубыток"}` : r.symbol === "?" ? `<span class="muted">${esc((r.text || "").slice(0, 80))}</span>` : `<b>${esc(r.symbol)}</b> ${r.side === "Buy" ? "LONG" : "SHORT"} · ${esc(r.entry)} · стоп ${r.stop} · целей ${r.targets.length}`;
+          return `<tr><td>${r.id}</td><td>${dt(r.at)}</td><td>${esc(r.channel)}</td><td>${what}</td><td><span class="tag ${st[1]}">${st[0]}</span></td><td class="small">${esc(r.summary || "")}</td></tr>`;
+        }))}
+      </div>`;
+    bind();
+  };
+  function bind() {
+    $("sgSave").onclick = async () => {
+      try { await post("/signals/settings", { signal_enabled: $("sgEn").checked, signal_real_enabled: $("sgReal").checked, signal_max_chase_pct: $("sgChase").value }); toast("Сохранено"); reload(); } catch (e) { toast(e.message); }
+    };
+    $("chNew").onclick = () => chDialog(null);
+    $("view").querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => chDialog(d.channels.find((c) => c.id == b.dataset.edit))));
+    $("view").querySelectorAll("[data-tog]").forEach((b) => (b.onclick = async () => {
+      const c = d.channels.find((x) => x.id == b.dataset.tog);
+      try { await post("/signals/channels", chBody(c, { enabled: !c.enabled })); reload(); } catch (e) { toast(e.message); }
+    }));
+    $("adAdd").onclick = async () => { try { await post("/signals/admins", { tg_id: $("adTg").value.trim(), name: $("adName").value }); toast("Добавлен"); reload(); } catch (e) { toast(e.message); } };
+    $("view").querySelectorAll("[data-atog]").forEach((b) => (b.onclick = async () => { await api("/signals/admins/" + b.dataset.atog, { method: "PUT", body: JSON.stringify({ enabled: b.dataset.en === "1" }) }); reload(); }));
+    $("view").querySelectorAll("[data-adel]").forEach((b) => (b.onclick = async () => { if (confirm("Удалить админа?")) { await api("/signals/admins/" + b.dataset.adel, { method: "DELETE" }); reload(); } }));
+    $("pgGo").onclick = async () => {
+      try { $("pgOut").innerHTML = fmtRes(await post("/signals/parse", { text: $("pgText").value, channel_id: Number($("pgCh").value) })); } catch (e) { toast(e.message); }
+    };
+    $("igRot").onclick = async () => { if (!confirm("Старый токен перестанет работать. Сменить?")) return; const r = await post("/signals/token/rotate"); $("igTok").textContent = r.token; toast("Токен изменён"); };
+  }
+  const chBody = (c, over = {}) => ({ id: c.id, name: c.name, source_key: c.source_key, enabled: c.enabled, mode: c.mode, risk_mult: c.risk_mult, max_chase_pct: c.max_chase_pct ?? "", parser: c.parser, notes: c.notes, ...over });
+  async function reload() { d = await api("/signals/overview"); draw(); }
+  function chDialog(c) {
+    const isNew = !c;
+    c = c || { id: 0, name: "", source_key: "", enabled: false, mode: "demo", risk_mult: 1, max_chase_pct: null, parser: {}, notes: "", examples: [] };
+    const p = c.parser || {};
+    const dis = isNew ? "" : "";
+    $("modal").innerHTML = `<div class="head"><h2>${isNew ? "Новый канал" : "Канал: " + esc(c.name)}</h2><button class="btn" id="mClose">✕</button></div>
+      <div class="grid2"><label>Название<input class="inp" id="cName" value="${esc(c.name)}"></label>
+      <label>Ключ источника<input class="inp" id="cKey" value="${esc(c.source_key)}" placeholder="-1001234567890 / manual / ext:имя"></label></div>
+      <div class="muted small">Ключ: id канала (число вида -100…; его показывает бот при первой пересылке), <code>manual</code> — пересылки без канала, <code>ext:имя</code> — внешний ридер.</div>
+      <div class="grid2" style="margin-top:8px"><label>Режим<select id="cMode"><option value="demo" ${c.mode === "demo" ? "selected" : ""}>Демо-счета</option><option value="real" ${c.mode === "real" ? "selected" : ""}>Демо + реальные (нужно глобальное разрешение)</option></select></label>
+      <label>Множитель риска (0.1–3)<input class="inp" id="cRisk" type="number" step="0.1" value="${c.risk_mult}"></label></div>
+      <div class="grid2"><label>Допуск ухода цены, % (пусто = общий)<input class="inp" id="cChase" type="number" step="0.05" value="${c.max_chase_pct ?? ""}"></label>
+      <label class="row" style="gap:8px;align-self:end"><input type="checkbox" id="cEn" style="width:auto" ${c.enabled ? "checked" : ""}> Канал включён</label></div>
+      <label>Заметка<input class="inp" id="cNotes" value="${esc(c.notes)}"></label>
+      <h3 style="margin-top:14px">Как разбирать посты этого канала</h3>
+      <div class="muted small">Слова через запятую. Пусто — по умолчанию. Регистр не важен, пробел и дефис внутри слова необязательны.</div>
+      <div class="grid2">${PARSER_FIELDS.map(([k, l]) => `<label>${l}<input class="inp" data-pf="${k}" value="${esc(p[k] || "")}" placeholder="${esc(d.defaults[k])}"></label>`).join("")}
+      <label>Как записана монета<select id="cStyle"><option value="hash" ${p.symbol_style !== "any" ? "selected" : ""}>#COIN/USDT (строго)</option><option value="any" ${p.symbol_style === "any" ? "selected" : ""}>любая: COINUSDT, COIN/USDT, #COIN</option></select></label></div>
+      <button class="btn primary big" id="cSave" style="margin-top:12px">Сохранить канал</button>
+      <h3 style="margin-top:18px">Примеры постов</h3>
+      ${isNew ? '<div class="muted small">Сохраните канал — тогда можно добавлять примеры.</div>' : `
+      <div class="muted small" style="margin-bottom:6px">Реальные посты канала с ожидаемым результатом. Галочка — разбор даёт то, что ожидается. После смены слов сразу видно, ничего ли не сломалось.</div>
+      <div id="exList">${c.examples.map((e) => `<div class="note ${e.pass ? "" : "err"}" style="margin-bottom:6px"><div class="row" style="justify-content:space-between"><span><b>${e.pass ? "✓" : "✗"}</b> ${EX_KIND[e.kind]}</span><button class="btn danger" data-exdel="${e.id}">✕</button></div>
+        <pre style="white-space:pre-wrap;margin:6px 0 0;font:inherit;font-size:12px;color:var(--text)">${esc(e.text)}</pre>${e.pass ? "" : `<div class="small" style="margin-top:4px">Сейчас: ${e.result.type === "signal" ? (e.result.error ? "сигнал с ошибкой — " + esc(e.result.error) : "сигнал") : e.result.type === "update" ? "обновление" : "не распознан"}</div>`}</div>`).join("") || '<div class="muted small">Примеров пока нет.</div>'}</div>
+      <div class="row" style="margin-top:8px"><select id="exKind" style="max-width:200px"><option value="signal">Это сигнал</option><option value="update">Это обновление (закрыть/безубыток)</option><option value="noise">Это НЕ сигнал</option></select></div>
+      <textarea id="exText" rows="5" placeholder="Вставьте пост канала"></textarea>
+      <div class="row" style="margin-top:8px"><button class="btn" id="exAdd">Добавить пример</button><button class="btn primary" id="exTest">Проверить текст (с текущими словами)</button></div><div id="exOut" style="margin-top:8px"></div>
+      <div style="margin-top:14px"><button class="btn danger" id="cDel">Удалить канал</button></div>`}`;
+    $("modal").hidden = false; $("modalBg").hidden = false;
+    $("mClose").onclick = closeModal;
+    const parser = () => { const o = { symbol_style: $("cStyle").value }; $("modal").querySelectorAll("[data-pf]").forEach((i) => { if (i.value.trim()) o[i.dataset.pf] = i.value.trim(); }); return o; };
+    $("cSave").onclick = async () => {
+      try {
+        const r = await post("/signals/channels", { id: c.id, name: $("cName").value, source_key: $("cKey").value.trim(), enabled: $("cEn").checked, mode: $("cMode").value,
+          risk_mult: $("cRisk").value, max_chase_pct: $("cChase").value, parser: parser(), notes: $("cNotes").value });
+        toast("Канал сохранён"); await reload();
+        if (isNew) chDialog(d.channels.find((x) => x.id === r.id)); else chDialog(d.channels.find((x) => x.id === c.id));
+      } catch (e) { toast(e.message); }
+    };
+    if (isNew) return;
+    $("exAdd").onclick = async () => { try { await post("/signals/examples", { channel_id: c.id, kind: $("exKind").value, text: $("exText").value }); await reload(); chDialog(d.channels.find((x) => x.id === c.id)); } catch (e) { toast(e.message); } };
+    $("exTest").onclick = async () => { try { $("exOut").innerHTML = fmtRes(await post("/signals/parse", { text: $("exText").value, parser: parser() })); } catch (e) { toast(e.message); } };
+    $("modal").querySelectorAll("[data-exdel]").forEach((b) => (b.onclick = async () => { await api("/signals/examples/" + b.dataset.exdel, { method: "DELETE" }); await reload(); chDialog(d.channels.find((x) => x.id === c.id)); }));
+    $("cDel").onclick = async () => { if (!confirm("Удалить канал вместе с примерами? Журнал сигналов и сделки останутся.")) return; await api("/signals/channels/" + c.id, { method: "DELETE" }); closeModal(); reload(); };
+  }
+  draw();
+};
+
 // ───────────── ручная торговля ─────────────
 const MN_STATUS = { pending: "в очереди", open: "лимит выставлен", filled: "исполнен", done: "исполнен", cancelled: "отменён",
   cancel_requested: "отмена…", error: "ошибка" };

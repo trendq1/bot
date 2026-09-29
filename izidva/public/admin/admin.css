@@ -99,3 +99,5 @@ pre.log { background: #0a0b0e; border: 1px solid var(--border); border-radius: 1
   .cols2, .grid2 { grid-template-columns: 1fr; }
   .set-row { grid-template-columns: 1fr; }
 }
+tr.hl td { background: rgba(250,178,25,.08); }
+code { background: var(--surface-2); padding: 1px 5px; border-radius: 5px; font-size: 12px; }
