@@ -36,6 +36,7 @@ if (PHP_SAPI !== 'cli') {
     exit(1);
 }
 App\Log::$muted = true;
+ini_set('memory_limit', '2048M');                        // 2 года 5м-свечей — ~210 тыс. строк в памяти
 
 const BT_START_BALANCE = 1000.0;
 const BT_H1_BARS = 250;
@@ -223,7 +224,7 @@ $mcRuns = max(0, (int)btArg($argv, 'mc', '1000'));
 $funding = (float)btArg($argv, 'funding', '0.0001');
 $strategies = array_filter(explode(',', btArg($argv, 'strategies', 'grid,trend')));
 $enabled = ['grid' => in_array('grid', $strategies, true), 'trend' => in_array('trend', $strategies, true),
-    'liquidation' => in_array('liquidation', $strategies, true)];
+    'liquidation' => in_array('liquidation', $strategies, true), 'breakout' => in_array('breakout', $strategies, true)];
 $csv = btArg($argv, 'csv', '');
 
 $candles = $csv !== '' ? btLoadCsv($csv) : btFetchKlines(new Bybit(), $symbol, $days);
@@ -289,6 +290,14 @@ if ($full['trades'] < 30) {
 } else {
     echo "✓ PF ≥ 1 и $positiveFolds из $tradedFolds отрезков в плюсе. Это НЕ гарантия прибыли: следующий шаг — demo/paper минимум 2–4 недели.\n";
 }
+// Критерий принятия, заданный ДО прогона (не подбирается по результату): PF ≥ 1.2 минимум в 2/3 отрезков,
+// где были сделки, и минимум 30 сделок за весь период. Для 6 отрезков — 4 из 6.
+$goodFolds = count(array_filter($pfs, fn($s) => $s['trades'] > 0 && ($s['profit_factor'] === null ? $s['net_pnl'] > 0 : $s['profit_factor'] >= 1.2)));
+$need = max(1, (int)ceil($folds * 2 / 3));
+$accepted = $full['trades'] >= 30 && ($full['profit_factor'] ?? 0) >= 1.2 && $goodFolds >= $need;
+printf("Критерий принятия (PF ≥ 1.2 за весь период и минимум в %d из %d отрезков, ≥ 30 сделок): %s — отрезков с PF ≥ 1.2: %d\n",
+    $need, $folds, $accepted ? 'ПРОЙДЕН' : 'НЕ ПРОЙДЕН', $goodFolds);
+$report['accepted'] = $accepted;
 $json = btArg($argv, 'json', '');
 if ($json !== '') {
     file_put_contents($json, json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));

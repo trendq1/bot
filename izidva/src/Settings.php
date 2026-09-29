@@ -34,6 +34,7 @@ final class Settings
         'kill_switch' => ['bool', false, 'АВАРИЙНАЯ ОСТАНОВКА: закрыть все позиции всех клиентов и не торговать', 'Торговля', false, ''],
         'strategy_grid_enabled' => ['bool', true, 'Стратегия «сетка» разрешена на платформе (только в подтверждённом боковике)', 'Торговля', false, ''],
         'strategy_trend_enabled' => ['bool', true, 'Стратегия «тренд 1h» разрешена на платформе', 'Торговля', false, ''],
+        'strategy_breakout_enabled' => ['bool', false, 'Стратегия «пробой канала 4h» (включать только после бэктеста: php bin/backtest.php МОНЕТА --strategies=breakout)', 'Торговля', false, ''],
         'strategy_liquidation_enabled' => ['bool', false, 'Стратегия «отскок после ликвидаций» (на истории не проверяется — по умолчанию выключена)', 'Торговля', false, ''],
         'price_month_usd' => ['float', 15.0, 'Аренда бота на 1 месяц, $', 'Тарифы', false, ''],
         'price_half_year_usd' => ['float', 50.0, 'Аренда бота на 6 месяцев, $', 'Тарифы', false, ''],

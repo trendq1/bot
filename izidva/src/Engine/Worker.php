@@ -19,6 +19,10 @@ final class Worker
     public const MAX_HOLD_SEC = 3 * 3600;
     /** Трендовая сделка на 1h живёт дольше, но не бесконечно: нет движения за двое суток — edge исчез. */
     public const TREND_MAX_HOLD_SEC = 48 * 3600;
+    /** Пробой 4h — трендследование: держим, пока ведёт трейлинг, но не дольше месяца. */
+    public const BREAKOUT_MAX_HOLD_SEC = 30 * 86400;
+    /** Трейлинг пробоя (Chandelier Exit): стоп на этом числе ATR(4h) от лучшей цены с момента входа. */
+    public const BREAKOUT_TRAIL_ATR = 3.0;
     /** Комиссия тейкера за вход+выход не должна съедать больше этой доли R — иначе сделка не имеет смысла. */
     public const MAX_FEE_R = 0.15;
     /** Стоп трендовой сделки не ближе стольких ATR(1h). */
@@ -62,6 +66,7 @@ final class Worker
     /** Лимитные ручные ордера, ждущие исполнения: symbol => [link, order_id, side, qty, stop, take, placed_ms] */
     public array $pendingManual = [];
     public array $lastTrendBar = [];
+    public array $lastBreakoutBar = [];
     public array $lastLiq = [];
     /** symbol => время последнего стопа сетки — для паузы перед новым входом на той же монете. */
     public array $lastGridStop = [];
@@ -166,6 +171,8 @@ final class Worker
             'grid' => ($this->enabled['grid'] ?? true) ? $ins['w_grid'] * $m('grid') : 0.0,
             'trend' => ($this->enabled['trend'] ?? true) ? $ins['w_trend'] * $m('trend') : 0.0,
             'liquidation' => ($this->enabled['liquidation'] ?? true) ? $ins['w_liquidation'] * $m('liquidation') : 0.0,
+            // у ИИ нет веса для пробоя — решает жёсткий сигнал, вес снижает только статистика обучения
+            'breakout' => ($this->enabled['breakout'] ?? true) ? $m('breakout') : 0.0,
         ];
     }
 
@@ -224,6 +231,7 @@ final class Worker
         }
         $this->applyPartialTake($sym, $feed->price);
         $this->applyTrailing($sym, $feed->price);
+        $this->applyChandelier($sym, $feed->price);
         $w = $this->weights($sym, $ins, $regime);
         $tuning = $this->brain->tuning[$sym] ?? [];
 
@@ -251,7 +259,15 @@ final class Worker
             return;
         }
         $setup = null;
-        if ($h1 && $this->strategyAllowed('trend', $regime, $now) && $w['trend'] >= 0.4
+        if ($this->strategyAllowed('breakout', $regime, $now) && $w['breakout'] >= 0.4) {
+            $k4 = Indicators::closedBars($feed->klines1h, 4);
+            $bar = $k4 ? (string)end($k4)[0] : null;
+            if ($bar !== null && ($this->lastBreakoutBar[$sym] ?? null) !== $bar) {
+                $this->lastBreakoutBar[$sym] = $bar;        // сигнал — один раз на закрытие 4h-свечи
+                $setup = Setups::breakout($k4, $feed->price);
+            }
+        }
+        if ($setup === null && $h1 && $this->strategyAllowed('trend', $regime, $now) && $w['trend'] >= 0.4
             && ($this->lastTrendBar[$sym] ?? null) !== $h1['last_closed_ts']) {
             $this->lastTrendBar[$sym] = $h1['last_closed_ts'];
             $rr = max(self::TREND_MIN_RR, (float)($tuning['trend_rr'] ?? $this->prof['rr']));
@@ -402,7 +418,7 @@ final class Worker
             } elseif ($against && $inProfit) {
                 $this->moveStopToBreakeven($sym);
             }
-        } elseif ($long ? $ins['regime'] === 'trend_down' : $ins['regime'] === 'trend_up') {
+        } elseif ($d['strategy'] === 'liquidation' && ($long ? $ins['regime'] === 'trend_down' : $ins['regime'] === 'trend_up')) {
             $reason = "разворот тренда против позиции ({$ins['regime']})";
         }
         if ($reason === null) {
@@ -443,7 +459,7 @@ final class Worker
     {
         $d = $this->directional[$sym] ?? null;
         $inst = $this->market->instruments[$sym] ?? null;
-        if (!$d || !$inst || $d['strategy'] === 'manual' || !$price || ($d['partial_done'] ?? false) || $d['risk_usd'] <= 0 || isset($d['gone_ms'])) {
+        if (!$d || !$inst || in_array($d['strategy'], ['manual', 'breakout'], true) || !$price || ($d['partial_done'] ?? false) || $d['risk_usd'] <= 0 || isset($d['gone_ms'])) {
             return;
         }
         $riskDist = $d['risk_usd'] / $d['qty'];
@@ -472,7 +488,7 @@ final class Worker
     {
         $d = $this->directional[$sym] ?? null;
         $inst = $this->market->instruments[$sym] ?? null;
-        if (!$d || !$inst || $d['strategy'] === 'manual' || !$price || $d['risk_usd'] <= 0 || (float)$d['stop'] <= 0 || isset($d['gone_ms'])) {
+        if (!$d || !$inst || in_array($d['strategy'], ['manual', 'breakout'], true) || !$price || $d['risk_usd'] <= 0 || (float)$d['stop'] <= 0 || isset($d['gone_ms'])) {
             return;
         }
         $riskDist = $d['risk_usd'] / $d['qty'];
@@ -501,6 +517,32 @@ final class Worker
             $this->directional[$sym]['stop'] = $newStop;
         } catch (\Throwable $e) {
             Log::error("user {$this->userId}: не удалось подвинуть стоп $sym: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Трейлинг пробоя (Chandelier Exit): стоп следует за лучшей ценой с момента входа на BREAKOUT_TRAIL_ATR × ATR(4h)
+     * и двигается только в свою пользу. Фиксированного тейка нет — сделка живёт, пока тренд не развернётся на 3 ATR.
+     */
+    private function applyChandelier(string $sym, float $price): void
+    {
+        $d = $this->directional[$sym] ?? null;
+        $inst = $this->market->instruments[$sym] ?? null;
+        if (!$d || !$inst || $d['strategy'] !== 'breakout' || !$price || empty($d['atr']) || isset($d['gone_ms'])) {
+            return;
+        }
+        $long = $d['side'] === 'Buy';
+        $best = $long ? max($d['best'] ?? $d['entry'], $price) : min($d['best'] ?? $d['entry'], $price);
+        $this->directional[$sym]['best'] = $best;
+        $newStop = (float)$inst->roundPrice($long ? $best - self::BREAKOUT_TRAIL_ATR * $d['atr'] : $best + self::BREAKOUT_TRAIL_ATR * $d['atr'], !$long);
+        if ($long ? $newStop <= $d['stop'] : $newStop >= $d['stop']) {
+            return;                                          // стоп двигаем только в свою пользу
+        }
+        try {
+            $this->ex->setStopLoss($sym, (string)$newStop);
+            $this->directional[$sym]['stop'] = $newStop;
+        } catch (\Throwable $e) {
+            Log::error("user {$this->userId}: не удалось подтянуть трейлинг-стоп пробоя $sym: " . $e->getMessage());
         }
     }
 
@@ -573,10 +615,11 @@ final class Worker
         }
         $long = $s['side'] === 'Buy';
         $stop = $inst->roundPrice($s['stop'], !$long);
-        $take = $inst->roundPrice($s['take'], !$long);
+        $take = $s['take'] !== null ? $inst->roundPrice($s['take'], !$long) : null;
         $this->ex->placeMarket($sym, $s['side'], $q, $stop, $take);
         $this->directional[$sym] = ['strategy' => $s['strategy'], 'side' => $s['side'], 'entry' => $s['entry'], 'stop' => (float)$stop,
-            'qty' => (float)$q, 'regime' => $regime, 'opened_ms' => (int)($this->now() * 1000), 'risk_usd' => (float)$q * $s['risk']];
+            'qty' => (float)$q, 'regime' => $regime, 'opened_ms' => (int)($this->now() * 1000), 'risk_usd' => (float)$q * $s['risk'],
+            'atr' => $s['atr'] ?? null, 'best' => $s['entry']];
         // Уведомление о входе стратегии в Telegram отключено — клиент видит открытые позиции в приложении.
     }
 
@@ -788,7 +831,7 @@ final class Worker
         foreach ($this->directional as $sym => $d) {
             if (isset($positions[$sym])) {
                 unset($this->directional[$sym]['gone_ms']);
-                $maxHold = $d['strategy'] === 'trend' ? self::TREND_MAX_HOLD_SEC : self::MAX_HOLD_SEC;
+                $maxHold = match ($d['strategy']) { 'trend' => self::TREND_MAX_HOLD_SEC, 'breakout' => self::BREAKOUT_MAX_HOLD_SEC, default => self::MAX_HOLD_SEC };
                 if ($d['strategy'] !== 'manual' && $nowMs - $d['opened_ms'] > $maxHold * 1000) {
                     $this->ex->closePosition($sym);
                 }
@@ -879,7 +922,7 @@ final class Worker
             $t['paper_balance'] = $this->ex->balance;
         }
         ($this->record)($this->userId, $t);
-        if (in_array($strategy, ['trend', 'liquidation'], true)) {
+        if (in_array($strategy, ['trend', 'liquidation', 'breakout'], true)) {
             $this->guard->recordDirectionalTrade();
         }
         $this->guard->onTrade($pnl, $this->now());

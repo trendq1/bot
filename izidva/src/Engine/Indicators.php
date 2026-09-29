@@ -196,6 +196,29 @@ final class Indicators
     }
 
     /**
+     * Только ЗАКРЫТЫЕ свечи старшего таймфрейма из 1h-свечей, выровненные по UTC (4h: 00,04,08…). Последняя 1h-свеча
+     * в данных API — незакрытая, её отбрасываем; неполные группы тоже — чтобы сигнал не строился на «будущей» свече.
+     * @param array $k1h свечи [ts, open, high, low, close, volume, turnover] от старых к новым
+     */
+    public static function closedBars(array $k1h, int $hours): array
+    {
+        $period = $hours * 3_600_000;
+        $groups = [];
+        foreach (array_slice($k1h, 0, -1) as $row) {
+            $groups[intdiv((int)$row[0], $period)][] = $row;
+        }
+        $out = [];
+        foreach ($groups as $g => $rows) {
+            if (count($rows) !== $hours) {
+                continue;
+            }
+            $out[] = [(string)($g * $period), $rows[0][1], max(array_column($rows, 2)), min(array_column($rows, 3)),
+                end($rows)[4], array_sum(array_column($rows, 5)), array_sum(array_column($rows, 6))];
+        }
+        return $out;
+    }
+
+    /**
      * Подтверждение тренда со старшего таймфрейма (по умолчанию 15м = 3× 5м): EMA9 против EMA21 на склеенных
      * свечах. null — данных недостаточно (мало истории) или таймфрейм сейчас без чёткого направления —
      * это НЕ повод блокировать сигнал, а сигнал «подтверждения нет ни за, ни против».

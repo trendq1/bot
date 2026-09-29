@@ -1498,6 +1498,80 @@ test('админка: аналитика сделок считается по р
     check($a['grid_sessions']['sessions'] >= 1 && $a['grid_sessions']['stops'] >= 1, 'сессии сетки собраны по session_id');
 });
 
+
+/** 1h-свечи для тестов пробоя: $flat часов около 100, затем $up часов роста; последняя — «незакрытая». */
+function h1Series(int $flat, int $up, float $step = 0.8): array
+{
+    $out = [];
+    $p = 100.0;
+    $t0 = 1_700_000_000_000 - (1_700_000_000_000 % 14_400_000);
+    for ($i = 0; $i < $flat + $up; $i++) {
+        $o = $p;
+        $p = $i < $flat ? 100.0 + ($i % 2 ? 0.4 : -0.4) : $p + $step;
+        $out[] = [(string)($t0 + $i * 3_600_000), $o, max($o, $p) + 0.2, min($o, $p) - 0.2, $p, 10.0, 10.0 * $p];
+    }
+    return $out;
+}
+test('closedBars: только закрытые 4h-свечи, выровненные по UTC, без незакрытой последней', function () {
+    $k = h1Series(10, 0);                                      // 10 часов от границы 4h: группы 4+4+2
+    $b = Indicators::closedBars($k, 4);
+    check(count($b) === 2, 'две полные 4h-свечи; неполная и незакрытая последняя 1h отброшены');
+    check((int)$b[0][0] % 14_400_000 === 0 && (float)$b[0][2] >= (float)$b[0][3], 'время выровнено по 4h, high ≥ low');
+    check(count(Indicators::closedBars(h1Series(9, 0), 4)) === 2, 'последняя 1h (незакрытая) не попадает в 4h-свечу');
+});
+test('Setups::breakout: пробой канала 20 × 4h по тренду EMA50 — вход, стоп 2 ATR, без фиксированного тейка', function () {
+    $k4 = Indicators::closedBars(h1Series(244, 5, 0.3), 4);   // долго боковик, затем выход вверх
+    $last = (float)end($k4)[4];
+    $s = Setups::breakout($k4, $last);
+    check($s !== null && $s['side'] === 'Buy' && $s['strategy'] === 'breakout', 'закрытие выше 20-свечного максимума и EMA50 — лонг');
+    check($s && $s['take'] === null && near($s['entry'] - $s['stop'], 2 * $s['atr'], 1e-6), 'стоп 2 ATR(4h), тейка нет — выход ведёт трейлинг');
+    check($s && Setups::feeR($s['entry'], $s['risk']) < Worker::MAX_FEE_R, 'стоп широкий — комиссия малая доля R');
+    check(Setups::breakout($k4, $last + 50 * $s['atr']) === null, 'цена уже ушла дальше 1 ATR от уровня — не догоняем');
+    check(Setups::breakout(Indicators::closedBars(h1Series(249, 0), 4), 100.0) === null, 'боковик без пробоя — сигнала нет');
+    $down = array_map(fn($r) => [$r[0], 200 - (float)$r[1], 200 - (float)$r[3], 200 - (float)$r[2], 200 - (float)$r[4], $r[5], $r[6]], h1Series(244, 5, 0.3));
+    $down4 = Indicators::closedBars($down, 4);
+    $sd = Setups::breakout($down4, (float)end($down4)[4]);
+    check($sd !== null && $sd['side'] === 'Sell', 'зеркально вниз — шорт');
+});
+test('пробой в Worker: вход раз в 4h-свечу, Chandelier-трейлинг только в свою пользу, без частичного тейка', function () use ($BTC) {
+    $k1h = h1Series(244, 5, 0.3);
+    $closed4h = Indicators::closedBars($k1h, 4);
+    $price = (float)end($closed4h)[4];                         // цена у уровня пробоя, а не уже убежавшая на 1+ ATR
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = $price;
+    $market->feeds['BTCUSDT']->klines1h = $k1h;
+    $brain = new Brain(new Learner(false));
+    $brain->features['BTCUSDT'] = ['price' => $price, 'atr' => 0.5, 'ema20' => $price, 'ema20_1' => $price, 'last_closed_ts' => 1.0, 'vwap_4h' => $price];
+    $brain->insights['BTCUSDT'] = ['regime' => 'range', 'confidence' => 0.5, 'w_grid' => 0.0, 'w_trend' => 0.0, 'w_liquidation' => 0.0,
+        'grid_mode' => 'off', 'grid_step_atr' => 0.6, 'risk_mult' => 1.0, 'summary' => '', 'source' => 'rules'];
+    $brain->regimes['BTCUSDT'] = Regime::WEAK_TREND;          // пробой не зависит от 1h-режима (кроме NO_TRADE)
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => $price]);
+    $w = new Worker(810, $ex, $market, $brain, Risk::profile('balanced'), ['BTCUSDT'],
+        ['grid' => false, 'trend' => false, 'liquidation' => false, 'breakout' => true], function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->step(50000.0);
+    $d = $w->directional['BTCUSDT'] ?? null;
+    check($d !== null && $d['strategy'] === 'breakout' && $d['side'] === 'Buy', 'пробой открыл лонг');
+    $w->platformEnabled = ['breakout' => false];
+    check(!(new ReflectionMethod(Worker::class, 'strategyAllowed'))->invoke($w, 'breakout', Regime::RANGE, 50000.0), 'выключатель платформы блокирует пробой');
+    $w->platformEnabled = [];
+    $stop0 = $d['stop'];
+    $w->directional['BTCUSDT']['opened_ms'] -= 120_000;
+    $up = $price + 5 * $d['atr'];
+    $market->feeds['BTCUSDT']->price = $up;
+    $ex->updatePrices(['BTCUSDT' => $up]);
+    $w->step(50003.0);
+    $d = $w->directional['BTCUSDT'];
+    check(near($d['stop'], $up - 3 * $d['atr'], 0.2) && $d['stop'] > $stop0, 'стоп подтянут на 3 ATR ниже лучшей цены');
+    check(!($d['partial_done'] ?? false), 'частичного тейка на +1R нет — прибыль не режем');
+    $back = $up - 1 * $d['atr'];
+    $market->feeds['BTCUSDT']->price = $back;
+    $ex->updatePrices(['BTCUSDT' => $back]);
+    $w->step(50006.0);
+    check(near($w->directional['BTCUSDT']['stop'], $d['stop'], 1e-9), 'на откате стоп назад не отодвигается');
+});
+
 echo "\n";
 if ($failed) {
     echo "ПРОВАЛЕНО: " . count($failed) . "\n  - " . implode("\n  - ", $failed) . "\n";

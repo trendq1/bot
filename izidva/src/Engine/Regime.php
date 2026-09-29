@@ -68,6 +68,8 @@ final class Regime
             'grid' => $regime === self::RANGE,
             // отскок после каскада ликвидаций — только когда нет сильного тренда, который его задавит
             'liquidation' => in_array($regime, [self::RANGE, self::HIGH_VOL], true),
+            // пробой канала 4h сам себе фильтр режима (канал + EMA50 на 4h); запрещён только без истории
+            'breakout' => $regime !== self::NO_TRADE,
             default => false,
         };
     }

@@ -4,7 +4,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const usd = (v, sign = false) => (v == null ? "—" : (sign && v > 0 ? "+" : "") + Number(v).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " $");
 const cls = (v) => (v > 0 ? "pos" : v < 0 ? "neg" : "");
 const dt = (s) => (s ? new Date(s + (s.endsWith("Z") ? "" : "Z")).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—");
-const STRAT = { grid: "Сетка", trend: "Тренд", liquidation: "Ликвидации", manual: "Вручную" };
+const STRAT = { grid: "Сетка", trend: "Тренд", liquidation: "Ликвидации", breakout: "Пробой 4h", manual: "Вручную" };
 const PROFILE = { conservative: "Консерв.", balanced: "Сбаланс.", aggressive: "Агрес." };
 const REGIME = { trend_up: "Тренд ↑", trend_down: "Тренд ↓", range: "Боковик", high_volatility: "Волатильно",
   strong_up: "Сильный тренд ↑", strong_down: "Сильный тренд ↓", weak_trend: "Неясно (не торгуем)", breakout: "Пробой",

@@ -18,7 +18,7 @@ final class Setups
         return $entry - $d * max($dist, $loAtr * $atr);
     }
 
-    private static function setup(string $strategy, string $side, float $entry, float $stop, float $take): array
+    private static function setup(string $strategy, string $side, float $entry, float $stop, ?float $take): array
     {
         return ['strategy' => $strategy, 'side' => $side, 'entry' => $entry, 'stop' => $stop, 'take' => $take, 'risk' => abs($entry - $stop)];
     }
@@ -56,6 +56,47 @@ final class Setups
                     return self::setup('trend', 'Sell', $price, $stop, $price - $rr * ($stop - $price));
                 }
             }
+        }
+        return null;
+    }
+
+    /** Пробой канала: сколько закрытых 4h-свечей в канале, EMA-фильтр направления, стоп в ATR, не догонять дальше ATR. */
+    public const BREAKOUT_LOOKBACK = 20;
+    public const BREAKOUT_TREND_EMA = 50;
+    public const BREAKOUT_STOP_ATR = 2.0;
+    public const BREAKOUT_MAX_CHASE_ATR = 1.0;
+
+    /**
+     * Пробой канала Дончиана на 4h (классика трендследования, параметры «черепах» — не подобраны под историю бота):
+     * закрытие последней 4h-свечи выше максимума 20 предыдущих и выше EMA50 — лонг (ниже минимума и ниже EMA50 — шорт).
+     * Стоп — 2 ATR(4h), фиксированного тейка нет: прибыль ведёт трейлинг-стоп (Worker::applyChandelier), чтобы редкие
+     * большие движения окупали частые небольшие стопы — «маленькие контролируемые убытки + большие прибыльные сделки».
+     * @param array $k4h только закрытые 4h-свечи (Indicators::closedBars)
+     */
+    public static function breakout(array $k4h, float $price): ?array
+    {
+        $n = count($k4h);
+        if ($n < self::BREAKOUT_TREND_EMA + 5) {
+            return null;
+        }
+        $h = array_map(fn($x) => (float)$x[2], $k4h);
+        $l = array_map(fn($x) => (float)$x[3], $k4h);
+        $c = array_map(fn($x) => (float)$x[4], $k4h);
+        $atrS = Indicators::wilder(Indicators::trueRanges($h, $l, $c), 14);
+        $atr = (float)end($atrS);
+        $ema = Indicators::ema($c, self::BREAKOUT_TREND_EMA);
+        $e = (float)end($ema);
+        $close = $c[$n - 1];
+        $hi = max(array_slice($h, $n - 1 - self::BREAKOUT_LOOKBACK, self::BREAKOUT_LOOKBACK));
+        $lo = min(array_slice($l, $n - 1 - self::BREAKOUT_LOOKBACK, self::BREAKOUT_LOOKBACK));
+        if ($atr <= 0) {
+            return null;
+        }
+        if ($close > $hi && $close > $e && $price > $hi && $price - $hi <= self::BREAKOUT_MAX_CHASE_ATR * $atr) {
+            return self::setup('breakout', 'Buy', $price, $price - self::BREAKOUT_STOP_ATR * $atr, null) + ['atr' => $atr];
+        }
+        if ($close < $lo && $close < $e && $price < $lo && $lo - $price <= self::BREAKOUT_MAX_CHASE_ATR * $atr) {
+            return self::setup('breakout', 'Sell', $price, $price + self::BREAKOUT_STOP_ATR * $atr, null) + ['atr' => $atr];
         }
         return null;
     }

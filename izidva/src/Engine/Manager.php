@@ -100,7 +100,7 @@ final class Manager
         }
         $halt = (bool)Settings::get('kill_switch');
         $platform = ['grid' => (bool)Settings::get('strategy_grid_enabled'), 'trend' => (bool)Settings::get('strategy_trend_enabled'),
-            'liquidation' => (bool)Settings::get('strategy_liquidation_enabled')];
+            'liquidation' => (bool)Settings::get('strategy_liquidation_enabled'), 'breakout' => (bool)Settings::get('strategy_breakout_enabled')];
         foreach ($this->workers as $uid => $w) {
             $w->halted = $halt;
             $w->platformEnabled = $platform;
