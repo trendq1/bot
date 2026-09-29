@@ -39,7 +39,13 @@ final class Learner
     public function mult(string $symbol, string $strategy, string $regime): float
     {
         $s = $this->cache["$symbol|$strategy|$regime"] ?? null;
-        return $s ? self::multiplier($s['ewma_r'], $s['n']) : 1.0;
+        if (!$s) {
+            return 1.0;
+        }
+        // EWMA помнит ~10 последних сделок: у сетки между редкими крупными стопами он почти всегда положительный,
+        // хотя средний результат по всей выборке отрицательный. Берём худшее из EWMA и полного Expectancy.
+        $expectancy = $s['n'] > 0 ? ($s['gross_win_r'] - $s['gross_loss_r']) / $s['n'] : 0.0;
+        return self::multiplier(min($s['ewma_r'], $expectancy), $s['n']);
     }
 
     /**

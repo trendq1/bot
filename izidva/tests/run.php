@@ -438,6 +438,24 @@ test('Learner: не только winrate — Profit Factor, Expectancy, Avg Win/
     $l2->load();
     check(near($l2->statsFor('TESTUSDT')['grid/range']['worst_r'], -6.0), 'статистика сохранена в БД и читается заново');
 });
+test('Learner: высокий winrate с отрицательным Expectancy урезает вес, даже когда свежий EWMA в плюсе', function () {
+    $l = new Learner(false);
+    for ($i = 0; $i < 5; $i++) {
+        $l->record('TAILUSDT', 'grid', 'range', 0.15, 0.05);
+    }
+    $l->record('TAILUSDT', 'grid', 'range', -2.5, -0.8);         // крупный стоп сетки
+    for ($i = 0; $i < 12; $i++) {
+        $l->record('TAILUSDT', 'grid', 'range', 0.15, 0.05);     // потом снова серия мелких плюсов
+    }
+    $l->record('TAILUSDT', 'grid', 'range', -2.5, -0.8);
+    for ($i = 0; $i < 12; $i++) {
+        $l->record('TAILUSDT', 'grid', 'range', 0.15, 0.05);
+    }
+    $s = $l->cache['TAILUSDT|grid|range'];
+    check($s['ewma_r'] > 0, 'EWMA (память ~10 сделок) после серии плюсов положительный — сам по себе обманул бы');
+    check(($s['gross_win_r'] - $s['gross_loss_r']) / $s['n'] < 0, 'при этом полный Expectancy отрицательный');
+    check($l->mult('TAILUSDT', 'grid', 'range') < 1.0, 'вес стратегии урезан по худшему из двух');
+});
 
 echo "ИИ через официальный SDK (заглушка API)\n";
 test('запрос к Claude и разбор ответа', function () {
@@ -796,6 +814,40 @@ test('подсчёт команды по уровням (downlineCounts)', funct
     $counts = Referral::downlineCounts(9101);
     check($counts === [1 => 1, 2 => 1, 3 => 1, 4 => 1, 5 => 1], 'по одному человеку на уровень в тестовой цепочке (6-й уровень не считается)');
     check(Referral::rank(0) === 1 && Referral::rank(5) === 2 && Referral::rank(10) === 3 && Referral::rank(20) === 4 && Referral::rank(50) === 5, 'ранг по размеру команды');
+});
+
+test('закрытие направленной сделки: ждём, пока Bybit отразит closed-pnl, а не пишем PnL 0', function () use ($BTC) {
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $BTC;
+    $market->feeds['BTCUSDT']->price = 99000.0;
+    $ex = new FakeLiveExchange();
+    $recorded = null;
+    $w = new Worker(790, $ex, $market, new Brain(new Learner(false)), Risk::profile('balanced'), ['BTCUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        function ($u, $t) use (&$recorded) { $recorded = $t; }, function ($u, $m) {}, function ($u, $e) {});
+    $open = ['strategy' => 'trend', 'side' => 'Buy', 'entry' => 100000.0, 'stop' => 99000.0, 'qty' => 0.01, 'regime' => 'trend_up',
+        'opened_ms' => (int)(microtime(true) * 1000) - 600_000, 'risk_usd' => 10.0];
+    $w->directional['BTCUSDT'] = $open;
+    $w->step(microtime(true));                                  // позиции на бирже уже нет, а closed-pnl ещё пуст
+    check($recorded === null && isset($w->directional['BTCUSDT']), 'сделка не записана с нулём — ждём данных биржи');
+    $ex->closedPnlQueue['BTCUSDT'] = [['pnl' => -10.4, 'exit' => 98980.0, 'ts' => 0]];
+    $w->step(microtime(true));
+    check($recorded !== null && near($recorded['pnl'], -10.4, 0.01) && near($recorded['exit'], 98980.0), 'записан реальный PnL и цена выхода с биржи');
+    check(!isset($w->directional['BTCUSDT']), 'снята с отслеживания');
+
+    $recorded = null;                                           // биржа так и не ответила за минуту — оценка по последней цене
+    $ex->closedPnlQueue = [];
+    $w->directional['BTCUSDT'] = $open + ['gone_ms' => (int)(microtime(true) * 1000) - 61_000];
+    $w->step(microtime(true));
+    check($recorded !== null && $recorded['pnl'] < -9.9 && near($recorded['exit'], 99000.0), 'после минуты — оценка по последней цене, но не 0');
+
+    $recorded = null;                                           // был частичный тейк: в истории пока только он — ждём финальное закрытие
+    $ex->closedPnlQueue['BTCUSDT'] = [['pnl' => 5.0, 'exit' => 101000.0, 'ts' => 0]];
+    $w->directional['BTCUSDT'] = $open + ['partial_done' => true];
+    $w->step(microtime(true));
+    check($recorded === null, 'одной записи частичного тейка мало — ждём запись остатка');
+    $ex->closedPnlQueue['BTCUSDT'][] = ['pnl' => 0.3, 'exit' => 100060.0, 'ts' => 1];
+    $w->step(microtime(true));
+    check($recorded !== null && near($recorded['pnl'], 5.3, 0.01), 'PnL = частичный тейк + остаток');
 });
 
 echo "Ручная торговля трейдера\n";

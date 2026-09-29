@@ -30,6 +30,8 @@ final class Worker
     private const TRAIL_START_R = 1.5;
     private const TRAIL_DISTANCE_R = 0.6;
     private const PARTIAL_TAKE_R = 1.0;
+    /** Сколько ждём, пока закрытие позиции появится в /v5/position/closed-pnl (у Bybit бывает задержка в секунды). */
+    private const CLOSED_PNL_WAIT_MS = 60_000;
     /** Bybit рассчитывает funding раз в 8 часов — используется для грубой оценки funding за время удержания. */
     private const FUNDING_INTERVAL_HOURS = 8.0;
     /** Границы клиентского множителя бюджета на сделку — скромный диапазон, чтобы не подрывать Risk Engine. */
@@ -337,7 +339,7 @@ final class Worker
     {
         $d = $this->directional[$sym] ?? null;
         $inst = $this->market->instruments[$sym] ?? null;
-        if (!$d || !$inst || $d['strategy'] === 'manual' || !$price || ($d['partial_done'] ?? false) || $d['risk_usd'] <= 0) {
+        if (!$d || !$inst || $d['strategy'] === 'manual' || !$price || ($d['partial_done'] ?? false) || $d['risk_usd'] <= 0 || isset($d['gone_ms'])) {
             return;
         }
         $riskDist = $d['risk_usd'] / $d['qty'];
@@ -366,7 +368,7 @@ final class Worker
     {
         $d = $this->directional[$sym] ?? null;
         $inst = $this->market->instruments[$sym] ?? null;
-        if (!$d || !$inst || $d['strategy'] === 'manual' || !$price || $d['risk_usd'] <= 0 || (float)$d['stop'] <= 0) {
+        if (!$d || !$inst || $d['strategy'] === 'manual' || !$price || $d['risk_usd'] <= 0 || (float)$d['stop'] <= 0 || isset($d['gone_ms'])) {
             return;
         }
         $riskDist = $d['risk_usd'] / $d['qty'];
@@ -623,6 +625,7 @@ final class Worker
         $nowMs = (int)($now * 1000);
         foreach ($this->directional as $sym => $d) {
             if (isset($positions[$sym])) {
+                unset($this->directional[$sym]['gone_ms']);
                 if ($d['strategy'] !== 'manual' && $nowMs - $d['opened_ms'] > self::MAX_HOLD_SEC * 1000) {
                     $this->ex->closePosition($sym);
                 }
@@ -631,9 +634,24 @@ final class Worker
             if ($nowMs - $d['opened_ms'] < 3000) {
                 continue;
             }
+            $goneMs = $d['gone_ms'] ?? $nowMs;
+            $this->directional[$sym]['gone_ms'] = $goneMs;
             $closed = $this->ex->closedPnl($sym, $d['opened_ms'] - 1000);
+            // после частичного тейка в истории уже есть его запись — ждём ещё и запись финального закрытия
+            $partial = (bool)($d['partial_done'] ?? false);
+            $complete = count($closed) >= ($partial ? 2 : 1);
+            if (!$complete && $nowMs - $goneMs < self::CLOSED_PNL_WAIT_MS) {
+                continue;                                     // Bybit ещё не отразил закрытие в closed-pnl — иначе запишем PnL 0 вместо реального
+            }
             $pnl = array_sum(array_column($closed, 'pnl'));
-            $exit = $closed ? end($closed)['exit'] : $d['entry'];
+            $exit = $closed ? (float)end($closed)['exit'] : $d['entry'];
+            if (!$complete) {
+                $exit = ($this->market->feeds[$sym]->price ?? 0.0) ?: $d['entry'];
+                $restQty = $partial ? $d['qty'] / 2 : $d['qty'];
+                $pnl += ($d['side'] === 'Buy' ? 1 : -1) * ($exit - $d['entry']) * $restQty
+                    - ($d['entry'] + $exit) * $restQty * ExchangeInterface::TAKER_FEE;
+                Log::warn("user {$this->userId}: $sym — closed-pnl с биржи не пришёл за минуту, PnL оценён по последней цене");
+            }
             $pnl -= $this->fundingEstimate($sym, $d['side'], $d['qty'] * $d['entry'], $now - $d['opened_ms'] / 1000);
             $r = $d['risk_usd'] ? $pnl / $d['risk_usd'] : 0.0;
             unset($this->directional[$sym]);

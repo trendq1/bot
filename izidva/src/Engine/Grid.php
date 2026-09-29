@@ -11,7 +11,8 @@ namespace App\Engine;
  */
 final class Grid
 {
-    public const MIN_STEP_PCT = 0.2;
+    /** Комиссия мейкера съедает 2×0.02% с каждого цикла: при шаге 0.2% это 20% прибыли цикла, при 0.3% — 13%. */
+    public const MIN_STEP_PCT = 0.3;
     public const MAX_STEP_PCT = 2.0;
     public const STOP_BUFFER = 1.5;
 
