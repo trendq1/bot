@@ -59,7 +59,19 @@ function btFetchKlines(Bybit $api, string $symbol, int $days): array
     $candles = [];
     $cursor = $endMs;
     while ($cursor > $startMs) {
-        $r = $api->get('/v5/market/kline', ['category' => 'linear', 'symbol' => $symbol, 'interval' => '5', 'end' => $cursor, 'limit' => 1000]);
+        // Публичный лимит Bybit и разовые сбои ("Too many visits", "Get kline failed") — повтор с паузой, а не падение
+        for ($try = 1; ; $try++) {
+            try {
+                $r = $api->get('/v5/market/kline', ['category' => 'linear', 'symbol' => $symbol, 'interval' => '5', 'end' => $cursor, 'limit' => 1000]);
+                break;
+            } catch (\Throwable $e) {
+                if ($try >= 6) {
+                    throw $e;
+                }
+                fwrite(STDERR, "Bybit: {$e->getMessage()} — повтор через " . (2 ** $try) . " с\n");
+                sleep(2 ** $try);
+            }
+        }
         $batch = $r['list'] ?? [];
         if (!$batch) {
             break;
@@ -221,7 +233,7 @@ if ($n < $warm + 500) {
     fwrite(STDERR, "Мало свечей ($n): нужно минимум " . ($warm + 500) . " (≈" . ceil(($warm + 500) / 288) . " дней) — прогрев 250 часовых свечей\n");
     exit(1);
 }
-echo "Свечей 5м: $n (" . gmdate('Y-m-d', (int)($candles[0][0] / 1000)) . ' → ' . gmdate('Y-m-d', (int)($candles[$n - 1][0] / 1000)) . " UTC), "
+echo "=== $symbol ===\nСвечей 5м: $n (" . gmdate('Y-m-d', (int)($candles[0][0] / 1000)) . ' → ' . gmdate('Y-m-d', (int)($candles[$n - 1][0] / 1000)) . " UTC), "
     . "прогрев первых $warm свечей\n";
 
 if ($csv !== '') {
