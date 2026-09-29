@@ -26,7 +26,7 @@ const TZ = -new Date().getTimezoneOffset();
 const $ = (id) => document.getElementById(id);
 const state = { me: null, month: new Date(), exMode: "demo", draft: null, payMethod: "stars" };
 const locale = () => (LANG === "ru" ? "ru-RU" : "uk-UA");
-const STRAT = () => ({ grid: t("grid_title"), trend: t("trend_title"), liquidation: t("liquidation_title"), breakout: t("breakout_title") });
+const STRAT = () => ({ grid: t("grid_title"), trend: t("trend_title"), liquidation: t("liquidation_title"), breakout: t("breakout_title"), signal: t("signal_title") });
 const REGIME = () => ({ trend_up: t("regime_trend_up"), trend_down: t("regime_trend_down"), range: t("regime_range"), high_volatility: t("regime_high_volatility"),
   strong_up: t("regime_strong_up"), strong_down: t("regime_strong_down"), weak_trend: t("regime_weak_trend"), breakout: t("regime_breakout"), no_trade: t("regime_no_trade") });
 

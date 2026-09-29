@@ -98,7 +98,7 @@ final class Telegram
         self::call('setWebhook', [
             'url' => rtrim($baseUrl, '/') . '/tg/webhook.php',
             'secret_token' => self::webhookSecret(),
-            'allowed_updates' => ['message', 'pre_checkout_query'],
+            'allowed_updates' => ['message', 'channel_post', 'pre_checkout_query'],
             'drop_pending_updates' => true,
         ]);
         $url = (string)Settings::get('webapp_url');

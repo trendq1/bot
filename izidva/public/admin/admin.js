@@ -4,7 +4,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const usd = (v, sign = false) => (v == null ? "—" : (sign && v > 0 ? "+" : "") + Number(v).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " $");
 const cls = (v) => (v > 0 ? "pos" : v < 0 ? "neg" : "");
 const dt = (s) => (s ? new Date(s + (s.endsWith("Z") ? "" : "Z")).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—");
-const STRAT = { grid: "Сетка", trend: "Тренд", liquidation: "Ликвидации", breakout: "Пробой 4h", manual: "Вручную" };
+const STRAT = { grid: "Сетка", trend: "Тренд", liquidation: "Ликвидации", breakout: "Пробой 4h", signal: "Сигнал", manual: "Вручную" };
 const PROFILE = { conservative: "Консерв.", balanced: "Сбаланс.", aggressive: "Агрес." };
 const REGIME = { trend_up: "Тренд ↑", trend_down: "Тренд ↓", range: "Боковик", high_volatility: "Волатильно",
   strong_up: "Сильный тренд ↑", strong_down: "Сильный тренд ↓", weak_trend: "Неясно (не торгуем)", breakout: "Пробой",
@@ -478,7 +478,8 @@ VIEWS.manual = async () => {
       <button class="btn primary big" id="mnSend" style="margin-top:10px">Отправить ордер</button>
       <div class="note" id="mnRes"></div>
     </div>
-    <div class="card"><h3>Ордера этого клиента</h3><div id="mnOrders">—</div></div>`;
+    <div class="card"><h3>Ордера этого клиента</h3><div id="mnOrders">—</div></div>
+    <div class="card" id="mnSigCard" hidden><h3>📡 Сигналы из Telegram <span class="muted small">— включаются в Настройки → «Сигналы»; по умолчанию исполняются только на демо</span></h3><div id="mnSignals">—</div></div>`;
   const client = () => mnClients.find((c) => c.id === Number($("mnClient").value));
   const POS_LABEL = { grid: "Сетка", position: "Позиция", pending: "Лимит (ждёт)" };
   function renderInfo() {
@@ -569,7 +570,15 @@ VIEWS.manual = async () => {
       try { await post(`/manual/orders/${b.dataset.cancel}/cancel`); loadOrders(); } catch (e) { toast(e.message); }
     }));
   }
-  function refresh() { loadOrders().catch(() => {}); loadPositions().catch(() => {}); }
+  async function loadSignals() {
+    const rows = await api("/signals");                      // роль «трейдер» получает 403 — карточка остаётся скрытой
+    $("mnSigCard").hidden = false;
+    const st = { new: "в очереди", processed: "исполнен", rejected: "отклонён", duplicate: "дубль" };
+    $("mnSignals").innerHTML = table(["#", "Монета", "Сторона", "Вход", "Стоп", "Цели", "Статус", "Итог", "Когда"], rows.map((r) => `<tr><td>${r.id}</td><td>${esc(r.symbol)}</td>
+      <td>${r.side === "Buy" ? "LONG" : "SHORT"}</td><td class="num">${esc(r.entry)}</td><td class="num">${r.stop}</td><td class="small">${r.targets.join(" · ")}</td>
+      <td><span class="tag ${r.status === "processed" ? "ok" : r.status === "rejected" ? "bad" : ""}">${st[r.status] || r.status}</span></td><td class="small">${esc(r.summary || "")}</td><td>${dt(r.at)}</td></tr>`));
+  }
+  function refresh() { loadOrders().catch(() => {}); loadPositions().catch(() => {}); loadSignals().catch(() => {}); }
   renderInfo();
   mnTimer = setInterval(() => { if (current === "manual") refresh(); }, 4000);
 };

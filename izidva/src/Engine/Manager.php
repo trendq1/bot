@@ -89,6 +89,7 @@ final class Manager
         $this->handleCommands();
         $this->processManualOrders();
         $this->market->tick();
+        $this->processSignals();
         $this->refreshFeatures();
         if ($now - $this->ts['insights'] > 30) {
             $this->loadInsights($now);
@@ -332,6 +333,45 @@ final class Manager
             } else {
                 $this->updateManualOrder((int)$o['id'], 'done', 'ордер уже не активен (исполнен или клиент офлайн)');
             }
+        }
+    }
+
+    /**
+     * Сигналы из Telegram (таблица signals, status=new): каждому подходящему клиенту — Worker::signalOrder().
+     * По умолчанию только демо-счета (signal_real_enabled=0); итог по клиентам пишется в signal_orders и приходит в чат.
+     */
+    public function processSignals(): void
+    {
+        foreach (DB::all("SELECT * FROM signals WHERE status = 'new' ORDER BY id") as $sig) {
+            $order = ['symbol' => $sig['symbol'], 'side' => $sig['side'], 'entry_lo' => (float)$sig['entry_lo'], 'entry_hi' => (float)$sig['entry_hi'],
+                'stop' => (float)$sig['stop_loss'], 'targets' => json_decode((string)$sig['targets'], true) ?: []];
+            $real = (bool)Settings::get('signal_real_enabled');
+            $chase = (float)Settings::get('signal_max_chase_pct');
+            $opened = 0;
+            $skipped = [];
+            foreach ($this->workers as $uid => $w) {
+                if (!$real && $w->ex->mode() !== 'paper') {
+                    continue;
+                }
+                try {
+                    $r = $w->signalOrder($order, $chase);
+                } catch (\Throwable $e) {
+                    $r = ['status' => 'skipped', 'detail' => 'ошибка: ' . $e->getMessage()];
+                }
+                DB::insert('signal_orders', ['signal_id' => (int)$sig['id'], 'user_id' => $uid, 'status' => $r['status'], 'detail' => $r['detail'], 'created_at' => DB::now()]);
+                if ($r['status'] === 'opened') {
+                    $opened++;
+                } else {
+                    $skipped[$r['detail']] = ($skipped[$r['detail']] ?? 0) + 1;
+                }
+            }
+            $why = $skipped ? ' Пропущено: ' . implode('; ', array_map(fn($k, $v) => "$k ($v)", array_keys($skipped), $skipped)) . '.' : '';
+            $summary = "открыто клиентам: $opened.$why";
+            DB::update('signals', ['status' => 'processed', 'summary' => $summary], 'id = :id', [':id' => $sig['id']]);
+            if ($sig['reply_chat']) {
+                Telegram::send((int)$sig['reply_chat'], "✅ Сигнал #{$sig['id']} {$sig['symbol']}: $summary");
+            }
+            Log::info("signal #{$sig['id']} {$sig['symbol']}: $summary");
         }
     }
 

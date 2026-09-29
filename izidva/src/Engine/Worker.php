@@ -23,6 +23,10 @@ final class Worker
     public const BREAKOUT_MAX_HOLD_SEC = 30 * 86400;
     /** Трейлинг пробоя (Chandelier Exit): стоп на этом числе ATR(4h) от лучшей цены с момента входа. */
     public const BREAKOUT_TRAIL_ATR = 3.0;
+    /** Стратегии, которыми бот сам не управляет (ни трейлинга, ни досрочных выходов, ни принудительного закрытия по времени). */
+    public const UNMANAGED = ['manual', 'signal'];
+    /** Лимитный вход по сигналу, не исполненный за это время, снимается: сигнал устарел. */
+    public const SIGNAL_LIMIT_TTL_SEC = 4 * 3600;
     /** Комиссия тейкера за вход+выход не должна съедать больше этой доли R — иначе сделка не имеет смысла. */
     public const MAX_FEE_R = 0.15;
     /** Стоп трендовой сделки не ближе стольких ATR(1h). */
@@ -156,6 +160,10 @@ final class Worker
         $this->checkGridStops($now);
         $this->checkPendingManual($positions, $now);
         $this->reconcileExternalPositions($positions, $now);
+        // Сигналы бывают по любым монетам (не только из списка клиента), поэтому лестница целей ведётся здесь, а не в manageSymbol()
+        foreach (array_keys($this->directional) as $sym) {
+            $this->applySignalLadder($sym, $positions);
+        }
         foreach ($this->symbols as $sym) {
             $this->manageSymbol($sym, $positions, $allowed, $now);
         }
@@ -398,7 +406,7 @@ final class Worker
     private function checkExit(string $sym, array $ins, string $regime, ?array $h1, array $positions): bool
     {
         $d = $this->directional[$sym] ?? null;
-        if (!$d || $d['strategy'] === 'manual' || !isset($positions[$sym]) || isset($d['gone_ms'])) {
+        if (!$d || in_array($d['strategy'], self::UNMANAGED, true) || !isset($positions[$sym]) || isset($d['gone_ms'])) {
             return false;
         }
         $nowMs = (int)($this->now() * 1000);
@@ -459,7 +467,7 @@ final class Worker
     {
         $d = $this->directional[$sym] ?? null;
         $inst = $this->market->instruments[$sym] ?? null;
-        if (!$d || !$inst || in_array($d['strategy'], ['manual', 'breakout'], true) || !$price || ($d['partial_done'] ?? false) || $d['risk_usd'] <= 0 || isset($d['gone_ms'])) {
+        if (!$d || !$inst || in_array($d['strategy'], [...self::UNMANAGED, 'breakout'], true) || !$price || ($d['partial_done'] ?? false) || $d['risk_usd'] <= 0 || isset($d['gone_ms'])) {
             return;
         }
         $riskDist = $d['risk_usd'] / $d['qty'];
@@ -488,7 +496,7 @@ final class Worker
     {
         $d = $this->directional[$sym] ?? null;
         $inst = $this->market->instruments[$sym] ?? null;
-        if (!$d || !$inst || in_array($d['strategy'], ['manual', 'breakout'], true) || !$price || $d['risk_usd'] <= 0 || (float)$d['stop'] <= 0 || isset($d['gone_ms'])) {
+        if (!$d || !$inst || in_array($d['strategy'], [...self::UNMANAGED, 'breakout'], true) || !$price || $d['risk_usd'] <= 0 || (float)$d['stop'] <= 0 || isset($d['gone_ms'])) {
             return;
         }
         $riskDist = $d['risk_usd'] / $d['qty'];
@@ -554,7 +562,7 @@ final class Worker
                 continue;
             }
             foreach ($group as $other) {
-                if ($other !== $sym && isset($this->directional[$other]) && $this->directional[$other]['strategy'] !== 'manual') {
+                if ($other !== $sym && isset($this->directional[$other]) && !in_array($this->directional[$other]['strategy'], self::UNMANAGED, true)) {
                     return true;
                 }
             }
@@ -673,6 +681,130 @@ final class Worker
     }
 
     /**
+     * Сигнал из Telegram-канала (App\SignalParser): вход по зоне, стоп из сигнала, цели — лестницей reduce-only
+     * лимиток. Размер — от риска клиента и расстояния до стопа С УЧЁТОМ комиссий, а не «плечо X25» из канала.
+     * Бот не догоняет: цена ушла из зоны дальше $maxChasePct или уже достигла первой цели — сигнал пропускается.
+     * @param array{symbol:string,side:string,entry_lo:float,entry_hi:float,stop:float,targets:list<float>} $sig
+     * @return array{status:string,detail:string} status: opened | skipped
+     */
+    public function signalOrder(array $sig, float $maxChasePct): array
+    {
+        $skip = fn(string $why) => ['status' => 'skipped', 'detail' => $why];
+        $sym = (string)$sig['symbol'];
+        if ($this->halted) {
+            return $skip('аварийная остановка');
+        }
+        if ($this->now() < ($this->strategyPausedUntil['signal'] ?? 0)) {
+            return $skip('сигналы на паузе после просадки');
+        }
+        if (!$this->market->ensureSymbol($sym)) {
+            return $skip("монета $sym не найдена на Bybit");
+        }
+        if (isset($this->grids[$sym]) || isset($this->directional[$sym]) || isset($this->pendingManual[$sym]) || isset($this->ex->positions()[$sym])) {
+            return $skip('по монете уже есть позиция, сетка или ордер');
+        }
+        $inst = $this->market->instruments[$sym];
+        $price = (float)$this->market->feeds[$sym]->price;
+        if ($price <= 0) {
+            return $skip('нет текущей цены');
+        }
+        $long = $sig['side'] === 'Buy';
+        [$lo, $hi, $stop] = [(float)$sig['entry_lo'], (float)$sig['entry_hi'], (float)$sig['stop']];
+        $targets = array_map('floatval', $sig['targets']);
+        if ($long ? $price >= $targets[0] : $price <= $targets[0]) {
+            return $skip('цена уже достигла первой цели');
+        }
+        if ($long ? $price <= $hi : $price >= $lo) {
+            $limit = null;                                   // цена в зоне или лучше — входим по рынку
+            $ref = $price;
+        } else {
+            $edge = $long ? $hi : $lo;
+            $away = abs($price - $edge) / $edge;
+            if ($away > $maxChasePct / 100) {
+                return $skip(sprintf('цена ушла от зоны входа на %.2f%% (допуск %.2f%%)', $away * 100, $maxChasePct));
+            }
+            $limit = $edge;                                  // ждём возврата цены на границу зоны
+            $ref = $edge;
+        }
+        if ($long ? $stop >= $ref : $stop <= $ref) {
+            return $skip('цена уже за стопом');
+        }
+        $risk = abs($ref - $stop);
+        if (Setups::feeR($ref, $risk) > self::MAX_FEE_R) {
+            return $skip('стоп слишком близко — комиссия съедает больше 15% риска');
+        }
+        $riskUsd = $this->equity * $this->prof['risk_pct'] / 100 * min(1.0, $this->guard->adaptiveMult($this->equity)) * $this->budgetMult;
+        $perUnit = $risk + 2 * ExchangeInterface::TAKER_FEE * $ref;
+        $lev = (int)min($this->prof['leverage'], $inst->maxLeverage);
+        $q = $inst->roundQty(min($riskUsd / $perUnit, $this->equity * $lev * 0.9 / $ref, $inst->maxMktQty));
+        if (!$inst->qtyOk($q, $ref)) {
+            return $skip('депозит слишком мал для минимального лота');
+        }
+        if (!$this->canAddRisk($sym, (float)$q * $perUnit, (float)$q * $ref)) {
+            return $skip('лимит риска портфеля');
+        }
+        $this->ex->setLeverage($sym, $lev);
+        $this->leverageSet[$sym] = true;
+        $stopStr = (string)$inst->roundPrice($stop, !$long);
+        $side = $long ? 'Buy' : 'Sell';
+        $nowMs = (int)($this->now() * 1000);
+        if ($limit === null) {
+            $this->ex->placeMarket($sym, $side, $q, $stopStr, null);
+            $this->directional[$sym] = ['strategy' => 'signal', 'side' => $side, 'entry' => $price, 'stop' => (float)$stopStr, 'qty' => (float)$q,
+                'regime' => 'signal', 'opened_ms' => $nowMs, 'risk_usd' => (float)$q * $risk, 'targets' => $targets];
+            return ['status' => 'opened', 'detail' => "по рынку ~" . self::fmt($price) . ", объём $q, риск " . round((float)$q * $risk, 2) . '$'];
+        }
+        $limitStr = (string)$inst->roundPrice($limit, !$long);
+        $link = 'sig-' . bin2hex(random_bytes(6));
+        $this->ex->placeLimit($sym, $side, $q, $limitStr, $link, false, $stopStr, null);
+        $this->pendingManual[$sym] = ['link' => $link, 'order_id' => 0, 'side' => $side, 'qty' => (float)$q, 'stop' => (float)$stopStr, 'take' => null,
+            'placed_ms' => $nowMs, 'signal' => ['targets' => $targets]];
+        return ['status' => 'opened', 'detail' => "лимит $limitStr (цена вне зоны), объём $q, риск " . round((float)$q * $risk, 2) . '$'];
+    }
+
+    /**
+     * Цели сигнала — лестница reduce-only лимиток (равные доли позиции), ставится один раз, когда позиция уже есть на
+     * бирже. После первой сработавшей цели стоп переносится в безубыток. Остаток ордеров снимается при закрытии.
+     */
+    private function applySignalLadder(string $sym, array $positions): void
+    {
+        $d = $this->directional[$sym] ?? null;
+        $inst = $this->market->instruments[$sym] ?? null;
+        if (!$d || !$inst || $d['strategy'] !== 'signal' || !isset($positions[$sym]) || isset($d['gone_ms'])) {
+            return;
+        }
+        $long = $d['side'] === 'Buy';
+        $posQty = (float)$positions[$sym]['qty'];
+        if (!empty($d['ladder_done'])) {
+            if (!($d['trail_be'] ?? false) && $posQty < $d['qty'] * 0.95) {
+                $this->moveStopToBreakeven($sym);            // первая цель взята — защищаем остаток
+            }
+            return;
+        }
+        $targets = $d['targets'];
+        $n = count($targets);
+        while ($n > 1 && !$inst->qtyOk($inst->roundQty($posQty / $n), (float)$targets[0])) {
+            $n--;
+        }
+        $closeSide = $long ? 'Sell' : 'Buy';
+        $chosen = $n >= count($targets) ? $targets : array_slice($targets, 0, $n);
+        $per = (float)$inst->roundQty($posQty / $n);
+        $left = $posQty;
+        try {
+            foreach ($chosen as $i => $t) {
+                $qty = $i === $n - 1 ? $left : $per;
+                $left -= $per;
+                $this->ex->placeLimit($sym, $closeSide, self::fmt($qty), (string)$inst->roundPrice((float)$t, $closeSide === 'Sell'),
+                    'sigtp-' . bin2hex(random_bytes(4)), true);
+            }
+            $this->directional[$sym]['ladder_done'] = true;
+            $this->directional[$sym]['qty'] = $posQty;
+        } catch (\Throwable $e) {
+            Log::error("user {$this->userId}: лестница целей сигнала $sym не выставлена: " . $e->getMessage());
+        }
+    }
+
+    /**
      * Ручной ордер трейдера из админ-панели: монета, рынок/лимит, тейк/стоп, плечо.
      * @param array{symbol:string,side:string,order_type:string,qty:float,price:?float,stop_loss:?float,take_profit:?float,leverage:?int,id:int} $o
      * @return array{status:string,detail:string}
@@ -733,6 +865,14 @@ final class Worker
             if ($nowMs - $p['placed_ms'] < 2000) {
                 continue;                                     // даём бирже время исполнить/отразить ордер
             }
+            if (isset($p['signal']) && $nowMs - $p['placed_ms'] > self::SIGNAL_LIMIT_TTL_SEC * 1000) {
+                try {
+                    $this->ex->cancel($sym, $p['link']);
+                } catch (\Throwable) {
+                }
+                unset($this->pendingManual[$sym]);          // сигнал устарел, цена в зону так и не пришла
+                continue;
+            }
             try {
                 $r = $this->ex->orderResult($sym, $p['link']);
             } catch (\Throwable $e) {
@@ -742,10 +882,10 @@ final class Worker
                 unset($this->pendingManual[$sym]);
                 $entry = $r['avg_price'] > 0 ? $r['avg_price'] : ($positions[$sym]['entry'] ?? 0.0);
                 $qty = $r['filled_qty'] > 0 ? $r['filled_qty'] : $p['qty'];
-                $this->directional[$sym] = ['strategy' => 'manual', 'side' => $p['side'], 'entry' => $entry, 'stop' => $p['stop'] ?? 0.0,
-                    'qty' => $qty, 'regime' => 'manual', 'opened_ms' => $nowMs,
-                    'risk_usd' => $p['stop'] ? abs($entry - $p['stop']) * $qty : 0.0];
-                ($this->notify)($this->userId, "🖐 Лимитный ордер по $sym исполнен по " . self::fmt($entry));
+                $this->directional[$sym] = ['strategy' => isset($p['signal']) ? 'signal' : 'manual', 'side' => $p['side'], 'entry' => $entry, 'stop' => $p['stop'] ?? 0.0,
+                    'qty' => $qty, 'regime' => isset($p['signal']) ? 'signal' : 'manual', 'opened_ms' => $nowMs,
+                    'risk_usd' => $p['stop'] ? abs($entry - $p['stop']) * $qty : 0.0] + (isset($p['signal']) ? ['targets' => $p['signal']['targets']] : []);
+                ($this->notify)($this->userId, (isset($p['signal']) ? '📡 ' : '🖐 ') . "Лимитный ордер по $sym исполнен по " . self::fmt($entry));
                 $this->reportOrder((int)$p['order_id'], 'filled', 'исполнен по ' . self::fmt($entry));
             } elseif (in_array($r['status'], ['Cancelled', 'Rejected', 'Deactivated'], true)) {
                 unset($this->pendingManual[$sym]);
@@ -832,7 +972,7 @@ final class Worker
             if (isset($positions[$sym])) {
                 unset($this->directional[$sym]['gone_ms']);
                 $maxHold = match ($d['strategy']) { 'trend' => self::TREND_MAX_HOLD_SEC, 'breakout' => self::BREAKOUT_MAX_HOLD_SEC, default => self::MAX_HOLD_SEC };
-                if ($d['strategy'] !== 'manual' && $nowMs - $d['opened_ms'] > $maxHold * 1000) {
+                if (!in_array($d['strategy'], self::UNMANAGED, true) && $nowMs - $d['opened_ms'] > $maxHold * 1000) {
                     $this->ex->closePosition($sym);
                 }
                 continue;
@@ -870,6 +1010,12 @@ final class Worker
                 $this->lastBigLoss[$sym] = $now;              // Cooldown: крупный убыток — пауза перед новой направленной ставкой на этой монете
             }
             $this->recordTrade($sym, $d['strategy'], $d['side'], $d['qty'], $d['entry'], $exit, $pnl, $r, $d['regime']);
+            if ($d['strategy'] === 'signal') {
+                try {
+                    $this->ex->cancelAll($sym);              // закрыл стоп — оставшиеся ордера лестницы целей больше не нужны
+                } catch (\Throwable) {
+                }
+            }
         }
     }
 

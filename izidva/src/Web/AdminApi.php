@@ -75,6 +75,7 @@ final class AdminApi
         return match ([$m, $path]) {
             ['GET', '/me'] => ['username' => $a, 'role' => $admin['role'] ?? 'admin'],
             ['GET', '/overview'] => self::overview(max(7, min(365, (int)($_GET['days'] ?? 30)))),
+            ['GET', '/signals'] => self::signals(),
             ['GET', '/analytics'] => self::analytics(max(1, min(365, (int)($_GET['days'] ?? 30)))),
             ['GET', '/users'] => self::users((string)($_GET['q'] ?? ''), (string)($_GET['filter'] ?? 'all')),
             ['GET', '/payments'] => self::payments(),
@@ -297,6 +298,15 @@ final class AdminApi
      * По всем клиентам и режимам (live+paper) за период — чтобы сразу было видно, живёт ли математика в плюсе,
      * а не «выглядит прибыльно по количеству зелёных сделок».
      */
+    /** Последние сигналы из Telegram с результатом по клиентам — для проверки канала перед реальными деньгами. */
+    private static function signals(): array
+    {
+        $rows = DB::all('SELECT * FROM signals ORDER BY id DESC LIMIT 30');
+        return array_map(fn($s) => ['id' => (int)$s['id'], 'symbol' => $s['symbol'], 'side' => $s['side'], 'entry' => $s['entry_lo'] . '–' . $s['entry_hi'],
+            'stop' => (float)$s['stop_loss'], 'targets' => json_decode((string)$s['targets'], true) ?: [], 'status' => $s['status'],
+            'summary' => $s['summary'], 'at' => Api::iso($s['created_at'])], $rows);
+    }
+
     private static function analytics(int $days): array
     {
         $since = gmdate('Y-m-d H:i:s', time() - $days * 86400);

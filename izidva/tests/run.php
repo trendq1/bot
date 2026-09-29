@@ -41,6 +41,7 @@ use App\Migrator;
 use App\NowPayments;
 use App\Referral;
 use App\Settings;
+use App\SignalParser;
 
 $passed = 0;
 $failed = [];
@@ -460,7 +461,7 @@ test('миграции на пустую базу и повторно', function
     $applied = Migrator::run($pdo);
     check(count($applied) === count(Migrator::files()), 'все миграции');
     check(Migrator::run($pdo) === [], 'повторный запуск ничего не делает');
-    check((int)DB::val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()") === 24, '24 таблицы');
+    check((int)DB::val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()") === 26, '26 таблиц (с signals и signal_orders)');
 });
 test('настройки: секреты шифруются', function () {
     Settings::save(['anthropic_api_key' => 'sk-ant-1234', 'ai_interval_min' => '15', 'symbols' => 'btcusdt, ethusdt', 'require_referral' => 'false']);
@@ -1570,6 +1571,136 @@ test('пробой в Worker: вход раз в 4h-свечу, Chandelier-тр�
     $ex->updatePrices(['BTCUSDT' => $back]);
     $w->step(50006.0);
     check(near($w->directional['BTCUSDT']['stop'], $d['stop'], 1e-9), 'на откате стоп назад не отодвигается');
+});
+
+
+echo "Сигналы из Telegram\n";
+$SIG_PENGU = "СИГНАЛ #PENGU/USDT\n\n🔑 Открыть ШОРТ в диапазоне \$0.00997 - \$0.01008 с плечом X25\n\n🍒 Цели:\n\n🔘 Закрыть по \$0.00989\n🔘 Закрыть по \$0.00985\n🔘 Закрыть по \$0.00976\n🔘 Закрыть по \$0.00966\n🔘 Закрыть по \$0.00951\n\n❗️ СТОП ЛОСС: \$0.01041";
+$SIG_SOL = "СИГНАЛ #SOL/USDT\n\n🔑 Открыть ШОРТ в диапазоне \$120.4 - \$121.7 с плечом X25\n\n🍒 Цели:\n\n🔘 Закрыть по \$119.4\n🔘 Закрыть по \$118.9\n🔘 Закрыть по \$117.9\n🔘 Закрыть по \$116.7\n🔘 Закрыть по \$114.8\n\n❗️ СТОП ЛОСС: \$125.7";
+test('SignalParser: разбор реальных сообщений канала (PENGU, SOL) и защита от мусора', function () use ($SIG_PENGU, $SIG_SOL) {
+    $p = SignalParser::parse($SIG_PENGU);
+    check($p && $p['symbol'] === 'PENGUUSDT' && $p['side'] === 'Sell' && $p['leverage'] === 25, 'монета, шорт, плечо канала');
+    check($p && near($p['entry_lo'], 0.00997) && near($p['entry_hi'], 0.01008) && near($p['stop'], 0.01041), 'зона входа и стоп');
+    check($p && count($p['targets']) === 5 && near($p['targets'][4], 0.00951), 'все 5 целей по порядку');
+    check(SignalParser::validate($p) === null, 'корректный сигнал проходит проверку');
+    $s = SignalParser::parse($SIG_SOL);
+    check($s && $s['symbol'] === 'SOLUSDT' && near($s['entry_lo'], 120.4) && near($s['stop'], 125.7) && SignalParser::validate($s) === null, 'SOL');
+    check(SignalParser::parse('Всем привет! Сегодня рынок растёт 🚀') === null, 'обычное сообщение — не сигнал');
+    check(SignalParser::parse(str_replace('СТОП ЛОСС', 'СТОП', $SIG_SOL)) === null, 'без стоп-лосса — не сигнал (не открываем без защиты)');
+    $lng = SignalParser::parse(str_replace(['ШОРТ', '120.4', '121.7', '125.7'], ['ЛОНГ', '119.0', '119.5', '115.0'], $SIG_SOL));
+    check($lng && $lng['side'] === 'Buy' && SignalParser::validate($lng) !== null, 'лонг со стопом выше входа и целями вниз — ошибка проверки');
+    $bad = $p;
+    $bad['stop'] = 0.00990;
+    check(SignalParser::validate($bad) !== null, 'стоп внутри диапазона/не с той стороны — отклонён');
+    $bad = $p;
+    $bad['targets'] = [0.00989, 0.01000];
+    check(SignalParser::validate($bad) !== null, 'цель против направления — отклонена');
+    $bad = $p;
+    $bad['stop'] = 0.02;
+    check(SignalParser::validate($bad) !== null, 'стоп дальше 15% — похоже на опечатку, отклонён');
+});
+$sigSetup = function (float $price, string $sym = 'SOLUSDT') {
+    $inst = new Instrument($sym, '0.01', '0.1', 0.1, 10000, 5, 50);
+    $market = new Market([$sym]);
+    $market->instruments[$sym] = $inst;
+    $market->feeds[$sym]->price = $price;
+    $ex = new PaperExchange(1000);
+    $ex->updatePrices([$sym => $price]);
+    $w = new Worker(820, $ex, $market, new Brain(new Learner(false)), Risk::profile('balanced'), [$sym],
+        ['grid' => true, 'trend' => true, 'liquidation' => true], function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $w->step(1000.0);
+    return [$w, $ex, $market];
+};
+$solSignal = ['symbol' => 'SOLUSDT', 'side' => 'Sell', 'entry_lo' => 120.4, 'entry_hi' => 121.7, 'stop' => 125.7, 'targets' => [119.4, 118.9, 117.9, 116.7, 114.8]];
+test('сигнал: цена в зоне — вход по рынку, объём от риска клиента (не от «X25»), стоп на бирже, лестница целей', function () use ($sigSetup, $solSignal) {
+    [$w, $ex] = $sigSetup(121.0);
+    $r = $w->signalOrder($solSignal, 0.3);
+    check($r['status'] === 'opened', 'открыто: ' . $r['detail']);
+    $pos = $ex->positions()['SOLUSDT'] ?? null;
+    check($pos && $pos['side'] === 'Sell', 'шорт открыт');
+    $risk = $pos['qty'] * ((125.7 - 121.0) + 2 * ExchangeInterface::TAKER_FEE * 121.0);
+    check(near($risk, 5.0, 0.5), 'риск ≈ 0.5% депозита (5$), а не плечо канала');
+    check($ex->pos['SOLUSDT']['stop'] !== null && near($ex->pos['SOLUSDT']['stop'], 125.7, 0.11), 'стоп-лосс сигнала стоит на бирже');
+    $w->step(1003.0);                                            // следующий такт: позиция уже есть — ставится лестница целей
+    check(count($ex->orders['SOLUSDT'] ?? []) === 5, '5 reduce-only лимиток по целям');
+    check(($w->directional['SOLUSDT']['strategy'] ?? '') === 'signal' && !empty($w->directional['SOLUSDT']['ladder_done']), 'позиция под учётом как сигнал');
+});
+test('сигнал: первая цель сработала — стоп переносится в безубыток; остатки лестницы снимаются при закрытии', function () use ($sigSetup, $solSignal) {
+    [$w, $ex, $market] = $sigSetup(121.0);
+    $w->signalOrder($solSignal, 0.3);
+    $w->step(1003.0);
+    $w->directional['SOLUSDT']['opened_ms'] -= 120_000;
+    $market->feeds['SOLUSDT']->price = 119.3;                    // первая цель 119.4 взята
+    $w->step(1006.0);
+    $w->step(1009.0);
+    check($ex->pos['SOLUSDT']['size'] > -0.99 * 1e9 && abs($ex->positions()['SOLUSDT']['qty']) < $w->directional['SOLUSDT']['qty'] * 0.95, 'позиция уменьшилась на долю первой цели');
+    check($ex->pos['SOLUSDT']['stop'] < 121.0, 'стоп шорта перенесён к входу (безубыток), а не остался на 125.7');
+    $market->feeds['SOLUSDT']->price = 121.9;                    // откат в безубыток — остаток закрыт по стопу
+    $w->step(1012.0);
+    $w->step(1015.0);
+    check(!isset($w->directional['SOLUSDT']) && empty($ex->orders['SOLUSDT']), 'позиция закрыта, лишние ордера лестницы сняты');
+});
+test('сигнал: цена ушла от зоны — пропуск; рядом с зоной — лимит; цель уже взята — пропуск; дубль позиции — пропуск', function () use ($sigSetup, $solSignal) {
+    [$w, $ex] = $sigSetup(118.0);                               // ниже зоны на 2% и выше первой цели 119.4? нет — ниже неё
+    check($w->signalOrder($solSignal, 0.3)['status'] === 'skipped', 'цена уже за первой целью — пропуск');
+    [$w, $ex] = $sigSetup(119.9);                               // ниже зоны входа 120.4 на 0.4%, первая цель 119.4 ещё не взята
+    $r = $w->signalOrder($solSignal, 0.3);
+    check($r['status'] === 'skipped' && str_contains($r['detail'], 'ушла'), 'вне допуска 0.3% — не догоняем: ' . $r['detail']);
+    $r = $w->signalOrder($solSignal, 0.6);
+    check($r['status'] === 'opened' && isset($w->pendingManual['SOLUSDT']['signal']), 'в допуске 0.6% — лимит на границе зоны, ждём возврата цены');
+    check($w->signalOrder($solSignal, 0.6)['status'] === 'skipped', 'второй сигнал по той же монете при активном ордере — пропуск');
+    [$w, $ex] = $sigSetup(121.0);
+    $w->halted = true;
+    check($w->signalOrder($solSignal, 0.3)['status'] === 'skipped', 'аварийная остановка блокирует сигналы');
+    [$w, $ex] = $sigSetup(121.0);
+    $w->strategyPausedUntil['signal'] = 1e12;
+    check($w->signalOrder($solSignal, 0.3)['status'] === 'skipped', 'пауза после просадки по сигналам блокирует новые');
+});
+test('Manager::processSignals: демо-клиентам исполняется, реальным — только при явном разрешении; итог пишется в БД', function () use ($solSignal) {
+    $sol = new Instrument('SOLUSDT', '0.01', '0.1', 0.1, 10000, 5, 50);
+    $market = new Market(['SOLUSDT']);
+    $market->instruments['SOLUSDT'] = $sol;
+    $market->feeds['SOLUSDT']->price = 121.0;
+    $mgr = new Manager($market);
+    DB::insert('users', ['id' => 9911, 'first_name' => 'S1', 'created_at' => DB::now(), 'blocked' => false]);
+    DB::insert('users', ['id' => 9912, 'first_name' => 'S2', 'created_at' => DB::now(), 'blocked' => false]);
+    $paper = new PaperExchange(1000);
+    $paper->updatePrices(['SOLUSDT' => 121.0]);
+    $mk = fn($uid, $ex) => new Worker($uid, $ex, $market, $mgr->brain, Risk::profile('balanced'), ['SOLUSDT'],
+        ['grid' => true, 'trend' => true, 'liquidation' => true], function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $mgr->workers[9911] = $mk(9911, $paper);
+    $mgr->workers[9912] = $mk(9912, new FakeLiveExchange());
+    $mgr->workers[9911]->step(2000.0);
+    $mgr->workers[9912]->step(2000.0);
+    $sid = DB::insert('signals', ['symbol' => 'SOLUSDT', 'side' => 'Sell', 'entry_lo' => 120.4, 'entry_hi' => 121.7, 'stop_loss' => 125.7,
+        'targets' => $solSignal['targets'], 'channel_leverage' => 25, 'raw_text' => 't', 'source' => 'user:1', 'status' => 'new', 'created_at' => DB::now()]);
+    Settings::save(['signal_real_enabled' => false, 'signal_max_chase_pct' => 0.3]);
+    $mgr->processSignals();
+    $rows = DB::all('SELECT user_id, status FROM signal_orders WHERE signal_id = ?', [$sid]);
+    check(count($rows) === 1 && (int)$rows[0]['user_id'] === 9911 && $rows[0]['status'] === 'opened', 'только демо-клиент получил сделку, реальный не тронут');
+    check(DB::val('SELECT status FROM signals WHERE id = ?', [$sid]) === 'processed', 'сигнал помечен обработанным (не исполнится повторно)');
+    $mgr->processSignals();
+    check((int)DB::val('SELECT COUNT(*) FROM signal_orders WHERE signal_id = ?', [$sid]) === 1, 'повторный проход не дублирует исполнение');
+});
+
+test('Webhook: сигнал принимается только от разрешённого источника; дубль и отклонённый сигнал не исполняются', function () use ($SIG_SOL) {
+    Settings::save(['signal_enabled' => true, 'signal_allowed_ids' => ['777001', '-1001234']]);
+    $SIG_SOL = str_replace('#SOL', '#LINK', $SIG_SOL);          // другая монета, чтобы не пересечься с сигналом из предыдущего теста
+    $before = (int)DB::val("SELECT COUNT(*) FROM signals");
+    $msg = fn($text, $fromId, $chat = null) => ['message' => ['text' => $text, 'from' => ['id' => $fromId], 'chat' => $chat ?? ['id' => $fromId, 'type' => 'private']]];
+    \App\Web\Webhook::handle($msg($SIG_SOL, 555000));
+    check((int)DB::val("SELECT COUNT(*) FROM signals") === $before, 'сообщение от постороннего игнорируется — сигнал не создан');
+    \App\Web\Webhook::handle($msg($SIG_SOL, 777001));
+    check((int)DB::val("SELECT COUNT(*) FROM signals WHERE status = 'new'") === 1, 'пересланный сигнал от вашего ID принят и ждёт исполнения');
+    \App\Web\Webhook::handle($msg(str_replace(['120.4', '121.7'], ['120.5', '121.8'], $SIG_SOL), 777001));
+    check((int)DB::val("SELECT COUNT(*) FROM signals WHERE status = 'duplicate'") === 1, 'почти тот же сигнал (вход отличается на 0.1%) — дубль, второй раз не исполняется');
+    \App\Web\Webhook::handle($msg(str_replace('125.7', '118.0', $SIG_SOL), 777001));
+    check((int)DB::val("SELECT COUNT(*) FROM signals WHERE status = 'rejected'") === 1, 'стоп с неверной стороны — отклонён');
+    \App\Web\Webhook::handle(['channel_post' => ['text' => str_replace('#LINK', '#ETH', $SIG_SOL), 'chat' => ['id' => -1001234, 'type' => 'channel']]]);
+    check((int)DB::val("SELECT COUNT(*) FROM signals WHERE symbol = 'ETHUSDT' AND status IN ('new','rejected')") === 1, 'пост разрешённого канала тоже принимается');
+    \App\Web\Webhook::handle(['channel_post' => ['text' => $SIG_SOL, 'chat' => ['id' => -999, 'type' => 'channel']]]);
+    check((int)DB::val("SELECT COUNT(*) FROM signals") === $before + 4, 'пост чужого канала игнорируется');
+    Settings::save(['signal_enabled' => false, 'signal_allowed_ids' => []]);
 });
 
 echo "\n";
