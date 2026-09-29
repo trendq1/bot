@@ -122,7 +122,6 @@ async function loadHome() {
     });
     $("kWin").textContent = d.month.trades ? d.month.winrate + "%" : "—";
     drawEquity(d.equity_curve);
-    drawStrategies(d.by_strategy);
   } catch (e) { toast(e.message); }
 }
 
@@ -194,21 +193,6 @@ function drawEquity(points) {
   const leave = () => { tip.hidden = true; ["eqX", "eqDot"].forEach((id) => svg.getElementById(id).setAttribute("visibility", "hidden")); };
   svg.addEventListener("pointermove", move); svg.addEventListener("pointerdown", move); svg.addEventListener("pointerleave", leave);
   box.dataset.trend = up ? "up" : "down";
-}
-
-function drawStrategies(by) {
-  const strat = STRAT();
-  const keys = Object.keys(strat);
-  const maxAbs = Math.max(1e-9, ...keys.map((k) => Math.abs(by[k]?.pnl || 0)));
-  $("stratBars").innerHTML = keys.map((k) => {
-    const s = by[k] || { pnl: 0, trades: 0, wins: 0 };
-    const w = (Math.abs(s.pnl) / maxAbs) * 50;
-    const left = s.pnl >= 0 ? 50 : 50 - w;
-    const wr = s.trades ? Math.round((s.wins / s.trades) * 100) + "%" : "—";
-    return `<div class="bar-row"><div>${strat[k]}<div class="muted small">${t("n_trades_short", { n: s.trades })} · ${wr}</div></div>
-      <div class="bar-track"><span class="axis"></span><span class="bar" style="left:${left}%;width:${Math.max(w, s.pnl ? 1 : 0)}%;background:${s.pnl >= 0 ? "var(--win)" : "var(--loss)"}"></span></div>
-      <div class="bar-val num ${cls(s.pnl)}">${money(s.pnl)}</div></div>`;
-  }).join("");
 }
 
 // ───────────── календарь ─────────────
@@ -459,14 +443,6 @@ function renderSettings() {
     d.budget_mult = Number(el.dataset.v);
     $("budgetMult").querySelectorAll(".chip").forEach((x) => x.classList.toggle("on", x === el)); haptic();
   }));
-  $("coins").innerHTML = me.options.symbols.map((c) => `<button class="chip ${d.symbols.includes(c) ? "on" : ""}" data-c="${c}">${c.replace("USDT", "")}</button>`).join("");
-  $("coins").querySelectorAll(".chip").forEach((el) => el.addEventListener("click", () => {
-    const c = el.dataset.c;
-    if (d.symbols.includes(c)) d.symbols = d.symbols.filter((x) => x !== c);
-    else if (d.symbols.length < 8) d.symbols.push(c); else return toast(t("max_8_coins"));
-    el.classList.toggle("on", d.symbols.includes(c)); haptic();
-  }));
-  document.querySelectorAll("[data-s]").forEach((el) => { el.checked = !!d.strategies[el.dataset.s]; el.onchange = () => (d.strategies[el.dataset.s] = el.checked); });
 
   const ex = me.exchange;
   $("exBadge").textContent = ex ? t("uid_mode", { uid: ex.uid, mode: ex.mode === "live" ? t("mode_live") : t("mode_demo_short") }) : t("not_connected");
