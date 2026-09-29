@@ -21,11 +21,12 @@ final class SignalParser
             return null;
         }
         $side = in_array(mb_strtolower($m[1]), ['лонг', 'long'], true) ? 'Buy' : 'Sell';
-        if (!preg_match('/(?:диапазон\w*|вход\w*)\s*\$?\s*(\d+(?:[.,]\d+)?)\s*[-–—]\s*\$?\s*(\d+(?:[.,]\d+)?)/iu', $text, $m)) {
+        // вход — диапазон «$a - $b» или одна цена «$a» (тогда зона входа схлопывается в точку)
+        if (!preg_match('/(?:диапазон\w*|вход\w*)\s*\$?\s*(\d+(?:[.,]\d+)?)(?:\s*[-–—]\s*\$?\s*(\d+(?:[.,]\d+)?))?/iu', $text, $m)) {
             return null;
         }
         $a = $num($m[1]);
-        $b = $num($m[2]);
+        $b = isset($m[2]) && $m[2] !== '' ? $num($m[2]) : $a;
         if (!preg_match('/стоп[\s-]*лосс\s*:?\s*\$?\s*(\d+(?:[.,]\d+)?)/iu', $text, $sm)) {
             return null;
         }

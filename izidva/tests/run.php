@@ -1586,6 +1586,9 @@ test('SignalParser: разбор реальных сообщений канал�
     $s = SignalParser::parse($SIG_SOL);
     check($s && $s['symbol'] === 'SOLUSDT' && near($s['entry_lo'], 120.4) && near($s['stop'], 125.7) && SignalParser::validate($s) === null, 'SOL');
     check(SignalParser::parse('Всем привет! Сегодня рынок растёт 🚀') === null, 'обычное сообщение — не сигнал');
+    $one = SignalParser::parse("СИГНАЛ #PENGU/USDT\n\n🔑 Открыть ШОРТ в диапазоне \$0.01008 с плечом X25\n\n🍒 Цели:\n\n🔘 Закрыть по \$0.00988\n🔘 Закрыть по \$0.00984\n🔘 Закрыть по \$0.00975\n\n❗️ СТОП ЛОСС: \$0.01040");
+    check($one && near($one['entry_lo'], 0.01008) && near($one['entry_hi'], 0.01008) && count($one['targets']) === 3 && SignalParser::validate($one) === null,
+        'вход одной ценой (без диапазона) тоже принимается — зона схлопывается в точку');
     check(SignalParser::parse(str_replace('СТОП ЛОСС', 'СТОП', $SIG_SOL)) === null, 'без стоп-лосса — не сигнал (не открываем без защиты)');
     $lng = SignalParser::parse(str_replace(['ШОРТ', '120.4', '121.7', '125.7'], ['ЛОНГ', '119.0', '119.5', '115.0'], $SIG_SOL));
     check($lng && $lng['side'] === 'Buy' && SignalParser::validate($lng) !== null, 'лонг со стопом выше входа и целями вниз — ошибка проверки');
