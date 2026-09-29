@@ -689,7 +689,7 @@ final class Worker
      * @param array{symbol:string,side:string,entry_lo:float,entry_hi:float,stop:float,targets:list<float>} $sig
      * @return array{status:string,detail:string} status: opened | skipped
      */
-    public function signalOrder(array $sig, float $maxChasePct): array
+    public function signalOrder(array $sig, float $maxChasePct, float $riskMult = 1.0): array
     {
         $skip = fn(string $why) => ['status' => 'skipped', 'detail' => $why];
         $sym = (string)$sig['symbol'];
@@ -710,6 +710,8 @@ final class Worker
         if ($price <= 0) {
             return $skip('нет текущей цены');
         }
+        $sid = (int)($sig['id'] ?? 0);
+        $cid = isset($sig['channel_id']) ? (int)$sig['channel_id'] : null;
         $long = $sig['side'] === 'Buy';
         [$lo, $hi, $stop] = [(float)$sig['entry_lo'], (float)$sig['entry_hi'], (float)$sig['stop']];
         $targets = array_map('floatval', $sig['targets']);
@@ -735,7 +737,7 @@ final class Worker
         if (Setups::feeR($ref, $risk) > self::MAX_FEE_R) {
             return $skip('стоп слишком близко — комиссия съедает больше 15% риска');
         }
-        $riskUsd = $this->equity * $this->prof['risk_pct'] / 100 * min(1.0, $this->guard->adaptiveMult($this->equity)) * $this->budgetMult;
+        $riskUsd = $this->equity * $this->prof['risk_pct'] / 100 * min(1.0, $this->guard->adaptiveMult($this->equity)) * $this->budgetMult * max(0.0, $riskMult);
         $perUnit = $risk + 2 * ExchangeInterface::TAKER_FEE * $ref;
         $lev = (int)min($this->prof['leverage'], $inst->maxLeverage);
         $q = $inst->roundQty(min($riskUsd / $perUnit, $this->equity * $lev * 0.9 / $ref, $inst->maxMktQty));
@@ -753,15 +755,43 @@ final class Worker
         if ($limit === null) {
             $this->ex->placeMarket($sym, $side, $q, $stopStr, null);
             $this->directional[$sym] = ['strategy' => 'signal', 'side' => $side, 'entry' => $price, 'stop' => (float)$stopStr, 'qty' => (float)$q,
-                'regime' => 'signal', 'opened_ms' => $nowMs, 'risk_usd' => (float)$q * $risk, 'targets' => $targets];
+                'regime' => 'signal', 'opened_ms' => $nowMs, 'risk_usd' => (float)$q * $risk, 'targets' => $targets, 'signal_id' => $sid, 'channel_id' => $cid];
             return ['status' => 'opened', 'detail' => "по рынку ~" . self::fmt($price) . ", объём $q, риск " . round((float)$q * $risk, 2) . '$'];
         }
         $limitStr = (string)$inst->roundPrice($limit, !$long);
         $link = 'sig-' . bin2hex(random_bytes(6));
         $this->ex->placeLimit($sym, $side, $q, $limitStr, $link, false, $stopStr, null);
         $this->pendingManual[$sym] = ['link' => $link, 'order_id' => 0, 'side' => $side, 'qty' => (float)$q, 'stop' => (float)$stopStr, 'take' => null,
-            'placed_ms' => $nowMs, 'signal' => ['targets' => $targets]];
+            'placed_ms' => $nowMs, 'signal' => ['targets' => $targets, 'signal_id' => $sid, 'channel_id' => $cid]];
         return ['status' => 'opened', 'detail' => "лимит $limitStr (цена вне зоны), объём $q, риск " . round((float)$q * $risk, 2) . '$'];
+    }
+
+    /**
+     * Обновление от канала по сигналу: «в безубыток» или «закрыть». Касается только сделок ЭТОГО канала (по signal_id
+     * канала), чужие позиции и ручные сделки не трогает.
+     * @return array{status:string,detail:string}
+     */
+    public function signalUpdate(string $sym, string $action, ?int $channelId): array
+    {
+        $d = $this->directional[$sym] ?? null;
+        $p = $this->pendingManual[$sym] ?? null;
+        $mine = fn($x) => $x && ($channelId === null || (int)($x['channel_id'] ?? 0) === $channelId);
+        if ($d && ($d['strategy'] ?? '') === 'signal' && $mine($d)) {
+            if ($action === 'close') {
+                $this->closeManual($sym);
+                return ['status' => 'opened', 'detail' => 'позиция закрыта по сообщению канала'];
+            }
+            $this->moveStopToBreakeven($sym);
+            return ['status' => 'opened', 'detail' => !empty($this->directional[$sym]['trail_be']) ? 'стоп перенесён в безубыток' : 'безубыток не применён (цена ещё не ушла в плюс)'];
+        }
+        if ($p && isset($p['signal']) && $mine($p['signal'])) {
+            if ($action === 'close') {
+                $this->closeManual($sym);
+                return ['status' => 'opened', 'detail' => 'лимитный вход отменён по сообщению канала'];
+            }
+            return ['status' => 'skipped', 'detail' => 'позиции ещё нет (лимит не исполнен)'];
+        }
+        return ['status' => 'skipped', 'detail' => 'нет сделки этого канала по монете'];
     }
 
     /**
@@ -947,7 +977,7 @@ final class Worker
                 $qty = $r['filled_qty'] > 0 ? $r['filled_qty'] : $p['qty'];
                 $this->directional[$sym] = ['strategy' => isset($p['signal']) ? 'signal' : 'manual', 'side' => $p['side'], 'entry' => $entry, 'stop' => $p['stop'] ?? 0.0,
                     'qty' => $qty, 'regime' => isset($p['signal']) ? 'signal' : 'manual', 'opened_ms' => $nowMs,
-                    'risk_usd' => $p['stop'] ? abs($entry - $p['stop']) * $qty : 0.0] + (isset($p['signal']) ? ['targets' => $p['signal']['targets']] : []);
+                    'risk_usd' => $p['stop'] ? abs($entry - $p['stop']) * $qty : 0.0] + (isset($p['signal']) ? ['targets' => $p['signal']['targets'], 'signal_id' => $p['signal']['signal_id'] ?? 0, 'channel_id' => $p['signal']['channel_id'] ?? null] : []);
                 ($this->notify)($this->userId, (isset($p['signal']) ? '📡 ' : '🖐 ') . "Лимитный ордер по $sym исполнен по " . self::fmt($entry));
                 $this->reportOrder((int)$p['order_id'], 'filled', 'исполнен по ' . self::fmt($entry));
             } elseif (in_array($r['status'], ['Cancelled', 'Rejected', 'Deactivated'], true)) {
@@ -1072,7 +1102,8 @@ final class Worker
             if ($r <= self::BIG_LOSS_R_THRESHOLD) {
                 $this->lastBigLoss[$sym] = $now;              // Cooldown: крупный убыток — пауза перед новой направленной ставкой на этой монете
             }
-            $this->recordTrade($sym, $d['strategy'], $d['side'], $d['qty'], $d['entry'], $exit, $pnl, $r, $d['regime']);
+            $this->recordTrade($sym, $d['strategy'], $d['side'], $d['qty'], $d['entry'], $exit, $pnl, $r, $d['regime'],
+                !empty($d['signal_id']) ? 'sig' . $d['signal_id'] : null);
             if ($d['strategy'] === 'signal') {
                 try {
                     $this->ex->cancelAll($sym);              // закрыл стоп — оставшиеся ордера лестницы целей больше не нужны

@@ -72,6 +72,9 @@ final class AdminApi
         if (preg_match('#^/manual/mode/(\d+)$#', $path, $mm) && $m === 'POST') {
             return self::manualMode((int)$mm[1], $b, $a);
         }
+        if (str_starts_with($path, '/signals/')) {
+            return SignalsApi::handle($m, $path, $b, $a);
+        }
         return match ([$m, $path]) {
             ['GET', '/me'] => ['username' => $a, 'role' => $admin['role'] ?? 'admin'],
             ['GET', '/overview'] => self::overview(max(7, min(365, (int)($_GET['days'] ?? 30)))),

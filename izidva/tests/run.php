@@ -464,7 +464,7 @@ test('миграции на пустую базу и повторно', function
     $applied = Migrator::run($pdo);
     check(count($applied) === count(Migrator::files()), 'все миграции');
     check(Migrator::run($pdo) === [], 'повторный запуск ничего не делает');
-    check((int)DB::val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()") === 26, '26 таблиц (с signals и signal_orders)');
+    check((int)DB::val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()") === 29, '29 таблиц (с signals, signal_orders, signal_channels/admins/examples)');
 });
 test('настройки: секреты шифруются', function () {
     Settings::save(['anthropic_api_key' => 'sk-ant-1234', 'ai_interval_min' => '15', 'symbols' => 'btcusdt, ethusdt', 'require_referral' => 'false']);
@@ -1709,6 +1709,135 @@ test('Webhook: сигнал принимается только от разре�
     Settings::save(['signal_enabled' => false, 'signal_allowed_ids' => []]);
 });
 
+
+echo "Меню «Сигналы»: каналы, админы, примеры\n";
+test('SignalParser: слова канала настраиваются; обновления (закрыть / безубыток); неясное не исполняется', function () {
+    $en = "#AVAX/USDT\nGo LONG entry zone 39.8 - 40.2\nTP1 41\nTP2 42\nSL 38.5";
+    check(SignalParser::parse($en) === null, 'английский пост со словами «zone»/«Go LONG» по умолчанию не разбирается (нет «диапазон/вход»)');
+    $p = SignalParser::parse($en, ['entry_words' => 'entry zone']);
+    check($p && $p['symbol'] === 'AVAXUSDT' && $p['side'] === 'Buy' && near($p['entry_lo'], 39.8) && count($p['targets']) === 2 && near($p['stop'], 38.5), 'после настройки entry_words пост разобран (TP и SL — слова по умолчанию)');
+    check(SignalParser::findSymbol('AVAXUSDT long') === null && SignalParser::findSymbol('AVAXUSDT long', ['symbol_style' => 'any']) === 'AVAXUSDT', 'стиль монеты any понимает AVAXUSDT без #');
+    check(SignalParser::findSymbol('вход #PENGU лонг', ['symbol_style' => 'any']) === 'PENGUUSDT', '#COIN без /USDT в режиме any');
+    check(SignalParser::parseUpdate('#AVAX/USDT Закрываем сделку по рынку') === ['symbol' => 'AVAXUSDT', 'action' => 'close'], 'обновление: закрыть');
+    check(SignalParser::parseUpdate('#AVAX/USDT Переносим стоп в безубыток') === ['symbol' => 'AVAXUSDT', 'action' => 'breakeven'], 'обновление: безубыток');
+    check(SignalParser::parseUpdate('#AVAX/USDT закрываем, остаток в безубыток') === null, 'оба смысла сразу — не гадаем');
+    check(SignalParser::parseUpdate('Закрываем сделку') === null, 'без монеты обновление не применяется');
+    check(SignalParser::parseUpdate('#AVAX/USDT цель 1 взята', []) === null, 'обычный комментарий — не команда');
+});
+
+test('Signals::fromTelegram: админ из таблицы, пересылка из нового канала создаёт выключенный канал, ручной источник', function () {
+    Settings::save(['signal_enabled' => true, 'signal_allowed_ids' => []]);
+    DB::q('DELETE FROM signal_channels'); DB::q('DELETE FROM signal_admins'); DB::q("DELETE FROM signals WHERE symbol = 'AVAXUSDT'");
+    $post = "СИГНАЛ #AVAX/USDT\nОткрыть ЛОНГ в диапазоне \$39.8 - \$40.2 с плечом X10\nЗакрыть по \$41\nЗакрыть по \$42\nЗакрыть по \$43\nСТОП ЛОСС: \$38.5";
+    $pm = fn($text, $from, $extra = []) => ['text' => $text, 'from' => ['id' => $from], 'chat' => ['id' => $from, 'type' => 'private']] + $extra;
+    check(\App\Signals::fromTelegram($pm($post, 4242)) === false, 'не админ — сообщение не наше, бот обрабатывает как обычно');
+    DB::insert('signal_admins', ['tg_id' => 4242, 'name' => 'Артём', 'enabled' => 1, 'created_at' => DB::now()]);
+    $fwd = ['forward_origin' => ['type' => 'channel', 'chat' => ['id' => -1002000111, 'title' => 'Alpha Signals', 'type' => 'channel']]];
+    check(\App\Signals::fromTelegram($pm($post, 4242, $fwd)) === true, 'пересылка от админа обработана');
+    $ch = \App\Signals::channelByKey('-1002000111');
+    check($ch && !(int)$ch['enabled'] && $ch['name'] === 'Alpha Signals', 'неизвестный канал добавлен как выключенный');
+    check((int)DB::val("SELECT COUNT(*) FROM signals WHERE symbol = 'AVAXUSDT'") === 0, 'из выключенного канала сигнал не создан');
+    DB::update('signal_channels', ['enabled' => 1], 'id = :id', [':id' => $ch['id']]);
+    \App\Signals::fromTelegram($pm($post, 4242, $fwd));
+    $sig = DB::row("SELECT * FROM signals WHERE symbol = 'AVAXUSDT'");
+    check($sig && (int)$sig['channel_id'] === (int)$ch['id'] && $sig['status'] === 'new' && $sig['kind'] === 'signal', 'из включённого канала сигнал создан и привязан к каналу');
+    check((int)DB::val('SELECT posts_seen FROM signal_channels WHERE id = ?', [$ch['id']]) === 2, 'счётчик постов канала растёт (в т.ч. пересылка при создании)');
+    \App\Signals::fromTelegram($pm('#AVAX/USDT закрываем', 4242));
+    $man = \App\Signals::channelByKey('manual');
+    check($man && (int)$man['enabled'] && DB::val("SELECT kind FROM signals WHERE channel_id = ? ORDER BY id DESC LIMIT 1", [$man['id']]) === 'update', 'пересылка без канала → «ручной» источник (включён), обновление принято');
+    \App\Signals::fromTelegram(['text' => $post, 'chat' => ['id' => -1009998887, 'type' => 'channel', 'title' => 'Чужой']]);
+    $unk = \App\Signals::channelByKey('-1009998887');
+    check($unk && !(int)$unk['enabled'] && $unk['created_by'] === 'auto', 'пост неподключённого канала (бот — админ) создаёт выключенный канал «на подтверждение»');
+    Settings::save(['signal_enabled' => false]);
+    check(\App\Signals::fromTelegram($pm($post, 4242)) === false, 'при выключенном приёме сигналов система молчит');
+});
+
+test('исполнение по каналам: режим канала, множитель риска, обновления безубыток/закрыть, сделка привязана к сигналу', function () {
+    Settings::save(['signal_enabled' => true, 'signal_real_enabled' => true, 'signal_max_chase_pct' => 0.3]);
+    $avax = new Instrument('AVAXUSDT', '0.01', '0.1', 0.1, 10000, 5, 50);
+    $market = new Market(['AVAXUSDT']);
+    $market->instruments['AVAXUSDT'] = $avax;
+    $market->feeds['AVAXUSDT']->price = 40.0;
+    $mgr = new Manager($market);
+    DB::insert('users', ['id' => 9951, 'first_name' => 'C1', 'created_at' => DB::now(), 'blocked' => false]);
+    DB::insert('users', ['id' => 9952, 'first_name' => 'C2', 'created_at' => DB::now(), 'blocked' => false]);
+    $recorded = [];
+    $mk = function ($uid, $ex) use (&$recorded, $market, $mgr) {
+        return new Worker($uid, $ex, $market, $mgr->brain, Risk::profile('balanced'), ['AVAXUSDT'],
+            ['grid' => true, 'trend' => true, 'liquidation' => true], function ($u, $t) use (&$recorded) { $recorded[] = $t; }, function ($u, $m) {}, function ($u, $e) {});
+    };
+    $paper = new PaperExchange(1000);
+    $paper->updatePrices(['AVAXUSDT' => 40.0]);
+    $mgr->workers[9951] = $mk(9951, $paper);
+    $mgr->workers[9952] = $mk(9952, new FakeLiveExchange());
+    $mgr->workers[9951]->step(3000.0);
+    $mgr->workers[9952]->step(3000.0);
+    $cid = DB::val('SELECT id FROM signal_channels WHERE source_key = ?', ['-1002000111']);
+    DB::update('signal_channels', ['mode' => 'demo', 'risk_mult' => 0.5], 'id = :id', [':id' => $cid]);
+    $sid = (int)DB::val("SELECT id FROM signals WHERE symbol = 'AVAXUSDT' AND kind = 'signal' AND channel_id = ?", [$cid]);
+    $mgr->processSignals();
+    $rows = DB::all('SELECT user_id, status, detail FROM signal_orders WHERE signal_id = ?', [$sid]);
+    check(count($rows) === 1 && (int)$rows[0]['user_id'] === 9951 && $rows[0]['status'] === 'opened', 'глобально реальные разрешены, но канал в режиме demo → реальный клиент не тронут');
+    preg_match('/риск ([\d.]+)\$/u', $rows[0]['detail'], $mm);
+    check(isset($mm[1]) && (float)$mm[1] < 3.0, 'множитель риска канала 0.5 уменьшает риск (~2.5$ вместо ~5$): ' . ($rows[0]['detail'] ?? ''));
+    // обновление «в безубыток» от другого канала не должно трогать сделку
+    $other = DB::insert('signals', ['channel_id' => 999999, 'symbol' => 'AVAXUSDT', 'side' => '', 'entry_lo' => 0, 'entry_hi' => 0, 'stop_loss' => 0, 'targets' => [], 'raw_text' => 'x',
+        'source' => 't', 'kind' => 'update', 'action' => 'close', 'status' => 'new', 'created_at' => DB::now()]);
+    $mgr->processSignals();
+    check(isset($paper->positions()['AVAXUSDT']), 'обновление чужого канала позицию не закрыло');
+    $close = DB::insert('signals', ['channel_id' => $cid, 'symbol' => 'AVAXUSDT', 'side' => '', 'entry_lo' => 0, 'entry_hi' => 0, 'stop_loss' => 0, 'targets' => [], 'raw_text' => 'x',
+        'source' => 't', 'kind' => 'update', 'action' => 'close', 'status' => 'new', 'created_at' => DB::now()]);
+    $mgr->processSignals();
+    check(DB::val('SELECT status FROM signal_orders WHERE signal_id = ?', [$close]) === 'opened', 'обновление своего канала «закрыть» применено');
+    $t = 3000.0;
+    for ($i = 0; $i < 4 && !$recorded; $i++) {
+        $mgr->workers[9951]->step($t += 5);
+    }
+    check($recorded && ($recorded[0]['session_id'] ?? null) === 'sig' . $sid && $recorded[0]['strategy'] === 'signal', 'сделка записана с session_id = sig<id сигнала> — по нему считается статистика канала');
+});
+
+test('SignalsApi: обзор с бейджами примеров, сохранение канала, админы, playground, токен внешнего ридера', function () {
+    $ov = fn() => \App\Web\SignalsApi::handle('GET', '/signals/overview', [], 't');
+    $h = fn($m, $p, $b = []) => \App\Web\SignalsApi::handle($m, $p, $b, 't');
+    $res = $h('POST', '/signals/channels', ['name' => 'Test Chan', 'source_key' => 'ext:test1', 'enabled' => true, 'mode' => 'demo', 'risk_mult' => '0.8',
+        'max_chase_pct' => '', 'parser' => ['entry_words' => 'entry zone', 'stop_words' => '']]);
+    check($res['ok'] && $res['id'] > 0, 'канал создан');
+    $cid = $res['id'];
+    foreach ([['source_key' => 'bad key'], ['risk_mult' => 9], ['name' => 'Dup', 'source_key' => 'ext:test1']] as $bad) {
+        $threw = false;
+        try { $h('POST', '/signals/channels', $bad + ['name' => 'X', 'source_key' => 'ext:zz', 'risk_mult' => 1]); } catch (\App\Web\ApiError) { $threw = true; }
+        check($threw, 'некорректные данные канала отклонены');
+    }
+    $good = "#DOT/USDT\nLONG entry zone 6.9 - 7.0\nTP 7.2\nTP 7.4\nSL 6.7";
+    $h('POST', '/signals/examples', ['channel_id' => $cid, 'kind' => 'signal', 'text' => $good]);
+    $h('POST', '/signals/examples', ['channel_id' => $cid, 'kind' => 'noise', 'text' => 'Доброе утро, друзья!']);
+    $h('POST', '/signals/examples', ['channel_id' => $cid, 'kind' => 'update', 'text' => 'Привет всем']);
+    $c = current(array_filter($ov()['channels'], fn($x) => $x['id'] === $cid));
+    $pass = array_map(fn($e) => $e['pass'], $c['examples']);
+    check($pass === [true, true, false], 'бейджи примеров: сигнал и шум разобраны как ожидается, «update» без команды — провален');
+    check((array)$c['parser'] === ['entry_words' => 'entry zone'], 'пустые слова не сохраняются (остаются по умолчанию)');
+    $a = $h('POST', '/signals/parse', ['text' => $good, 'channel_id' => $cid]);
+    check($a['type'] === 'signal' && $a['ok'] && $a['signal']['symbol'] === 'DOTUSDT', 'playground: разбор настройками канала');
+    $a = $h('POST', '/signals/parse', ['text' => $good, 'parser' => []]);
+    check($a['type'] === 'none', 'playground: с настройками по умолчанию тот же пост не распознан (черновик настроек из формы)');
+    $ad = $h('POST', '/signals/admins', ['tg_id' => '555123', 'name' => 'Помощник']);
+    $threw = false; try { $h('POST', '/signals/admins', ['tg_id' => '555123']); } catch (\App\Web\ApiError) { $threw = true; }
+    check($ad['ok'] && $threw, 'админ добавлен, дубль отклонён');
+    check(in_array('555123', \App\Signals::adminIds(), true), 'админ виден приёму сообщений');
+    $h('PUT', '/signals/admins/' . $ad['id'], ['enabled' => false]);
+    check(!in_array('555123', \App\Signals::adminIds(), true), 'выключенный админ не принимается');
+    $t1 = \App\Signals::ingestToken();
+    $t2 = $h('POST', '/signals/token/rotate')['token'];
+    check($t1 !== $t2 && $t2 === \App\Signals::ingestToken(), 'токен внешнего ридера пересоздаётся');
+    $r = \App\Signals::ingest('test1', 'Test Chan', $good);
+    check($r['status'] === 'new', 'внешний ридер: пост принят в канал ext:test1 (настройки канала применены)');
+    $r = \App\Signals::ingest('brand-new', 'Новый', $good);
+    check($r['status'] === 'ignored' && \App\Signals::channelByKey('ext:brand-new') !== null, 'внешний ридер: неизвестный канал создан выключенным, пост не исполняется');
+    $h('DELETE', '/signals/channels/' . $cid);
+    check((int)DB::val('SELECT COUNT(*) FROM signal_examples WHERE channel_id = ?', [$cid]) === 0, 'удаление канала удаляет его примеры');
+    check($h('POST', '/signals/settings', ['signal_max_chase_pct' => '0.5'])['ok'] && (float)Settings::get('signal_max_chase_pct') === 0.5, 'глобальные переключатели сохраняются');
+    Settings::save(['signal_enabled' => false, 'signal_real_enabled' => false, 'signal_max_chase_pct' => 0.3]);
+});
 
 echo "Ордера и позиции (админка)\n";
 test('PaperExchange отдаёт для админки mark/upnl/SL/TP и открытые ордера; setTradingStop меняет и снимает уровни', function () {

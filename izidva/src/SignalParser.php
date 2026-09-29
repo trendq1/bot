@@ -9,32 +9,110 @@ namespace App;
  */
 final class SignalParser
 {
-    /** @return array{symbol:string,side:string,entry_lo:float,entry_hi:float,stop:float,targets:list<float>,leverage:?int}|null */
-    public static function parse(string $text): ?array
+    /** Слова по умолчанию; у каждого канала можно переопределить любой список (через запятую) в parser_config. */
+    public const DEFAULTS = [
+        'symbol_style' => 'hash',
+        'long_words' => 'лонг,long',
+        'short_words' => 'шорт,short',
+        'entry_words' => 'диапазон,вход',
+        'target_words' => 'закрыть,тейк,цель,tp',
+        'stop_words' => 'стоп лосс,stop loss,sl',
+        'close_words' => 'закрываем,закрыть все,закрыть сделку,закрываю,закрыта,close',
+        'be_words' => 'безубыток,безубытку,б/у,breakeven,break even',
+    ];
+
+    /** Список слов из строки «a, b c» или массива → регулярка-альтернатива (пробел/дефис между частями необязательны). */
+    private static function alt(array $cfg, string $key): string
     {
+        $raw = $cfg[$key] ?? '';
+        $words = is_array($raw) ? $raw : explode(',', (string)$raw);
+        $words = array_values(array_filter(array_map(fn($w) => trim((string)$w), $words), fn($w) => $w !== ''));
+        if (!$words) {
+            $words = explode(',', self::DEFAULTS[$key]);
+        }
+        $parts = [];
+        foreach ($words as $w) {
+            $parts[] = implode('[\s\-]*', array_map(fn($x) => preg_quote($x, '/'), preg_split('/[\s\-]+/u', $w, -1, PREG_SPLIT_NO_EMPTY) ?: [$w]));
+        }
+        return '(?:' . implode('|', $parts) . ')';
+    }
+
+    private static function cfg(array $cfg): array
+    {
+        return array_filter($cfg, fn($v) => $v !== null && $v !== '' && $v !== []) + self::DEFAULTS;
+    }
+
+    /** Монета из текста: hash — только «#COIN/USDT»; any — ещё «COINUSDT», «COIN/USDT», «#COIN». */
+    public static function findSymbol(string $text, array $cfg = []): ?string
+    {
+        $cfg = self::cfg($cfg);
+        if ($cfg['symbol_style'] === 'any') {
+            if (preg_match('/(?<![A-Za-z0-9])#?\s*([A-Za-z0-9]{2,15}?)\s*[\/\-]?\s*USDT(?![A-Za-z])/u', $text, $m)
+                || preg_match('/#\s*([A-Za-z0-9]{2,15})(?![A-Za-z0-9])/u', $text, $m)) {
+                return strtoupper($m[1]) . 'USDT';
+            }
+            return null;
+        }
+        return preg_match('/#\s*([A-Z0-9]{2,15})\s*\/\s*USDT/iu', $text, $m) ? strtoupper($m[1]) . 'USDT' : null;
+    }
+
+    /** @return array{symbol:string,side:string,entry_lo:float,entry_hi:float,stop:float,targets:list<float>,leverage:?int}|null */
+    public static function parse(string $text, array $cfg = []): ?array
+    {
+        $cfg = self::cfg($cfg);
         $num = fn(string $s) => (float)str_replace(',', '.', $s);
-        if (!preg_match('/#\s*([A-Z0-9]{2,15})\s*\/\s*USDT/iu', $text, $m)) {
+        $symbol = self::findSymbol($text, $cfg);
+        if ($symbol === null) {
             return null;
         }
-        $symbol = strtoupper($m[1]) . 'USDT';
-        if (!preg_match('/\b(лонг|long|шорт|short)\b/iu', $text, $m)) {
-            return null;
+        $b = '(?<![\p{L}\p{N}])';
+        $e = '(?![\p{L}\p{N}])';
+        $hasLong = preg_match('/' . $b . self::alt($cfg, 'long_words') . $e . '/iu', $text);
+        $hasShort = preg_match('/' . $b . self::alt($cfg, 'short_words') . $e . '/iu', $text);
+        if ($hasLong === $hasShort) {                          // ни одного или оба сразу — не гадаем
+            if (!$hasLong) {
+                return null;
+            }
+            preg_match('/' . $b . '(' . self::alt($cfg, 'long_words') . '|' . self::alt($cfg, 'short_words') . ')' . $e . '/iu', $text, $fm);
+            $hasLong = preg_match('/^' . self::alt($cfg, 'long_words') . '$/iu', $fm[1] ?? '');
         }
-        $side = in_array(mb_strtolower($m[1]), ['лонг', 'long'], true) ? 'Buy' : 'Sell';
+        $side = $hasLong ? 'Buy' : 'Sell';
         // вход — диапазон «$a - $b» или одна цена «$a» (тогда зона входа схлопывается в точку)
-        if (!preg_match('/(?:диапазон\w*|вход\w*)\s*\$?\s*(\d+(?:[.,]\d+)?)(?:\s*[-–—]\s*\$?\s*(\d+(?:[.,]\d+)?))?/iu', $text, $m)) {
+        if (!preg_match('/' . self::alt($cfg, 'entry_words') . '\w*\s*\$?\s*(\d+(?:[.,]\d+)?)(?:\s*[-–—]\s*\$?\s*(\d+(?:[.,]\d+)?))?/iu', $text, $m)) {
             return null;
         }
         $a = $num($m[1]);
-        $b = isset($m[2]) && $m[2] !== '' ? $num($m[2]) : $a;
-        if (!preg_match('/стоп[\s-]*лосс\s*:?\s*\$?\s*(\d+(?:[.,]\d+)?)/iu', $text, $sm)) {
+        $hi = isset($m[2]) && $m[2] !== '' ? $num($m[2]) : $a;
+        if (!preg_match('/' . $b . self::alt($cfg, 'stop_words') . '\s*:?\s*\$?\s*(\d+(?:[.,]\d+)?)/iu', $text, $sm)) {
             return null;
         }
-        preg_match_all('/(?:закрыть|тейк|цель|tp)\w*\s*(?:по)?\s*:?\s*\$?\s*(\d+(?:[.,]\d+)?)/iu', $text, $tm);
+        preg_match_all('/' . $b . self::alt($cfg, 'target_words') . '\w*\s*(?:по)?\s*:?\s*\$?\s*(\d+(?:[.,]\d+)?)/iu', $text, $tm);
         $targets = array_map($num, $tm[1] ?? []);
         $leverage = preg_match('/[xх]\s*(\d{1,3})\b/iu', $text, $lm) ? (int)$lm[1] : null;
-        return ['symbol' => $symbol, 'side' => $side, 'entry_lo' => min($a, $b), 'entry_hi' => max($a, $b),
+        return ['symbol' => $symbol, 'side' => $side, 'entry_lo' => min($a, $hi), 'entry_hi' => max($a, $hi),
             'stop' => $num($sm[1]), 'targets' => array_values($targets), 'leverage' => $leverage];
+    }
+
+    /**
+     * Обновление по открытой сделке: «#COIN … закрываем» или «#COIN … в безубыток». Нет монеты или неясно
+     * (оба смысла сразу) — null: лучше ничего не делать, чем закрыть чужую позицию.
+     * @return array{symbol:string,action:string}|null action = close|breakeven
+     */
+    public static function parseUpdate(string $text, array $cfg = []): ?array
+    {
+        $cfg = self::cfg($cfg);
+        $symbol = self::findSymbol($text, $cfg);
+        if ($symbol === null) {
+            return null;
+        }
+        $b = '(?<![\p{L}\p{N}])';
+        $e = '(?![\p{L}\p{N}])';
+        $close = (bool)preg_match('/' . $b . self::alt($cfg, 'close_words') . $e . '/iu', $text);
+        $be = (bool)preg_match('/' . $b . self::alt($cfg, 'be_words') . '/iu', $text);
+        if ($close === $be) {
+            return null;
+        }
+        return ['symbol' => $symbol, 'action' => $close ? 'close' : 'breakeven'];
     }
 
     /**

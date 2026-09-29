@@ -441,10 +441,15 @@ final class Manager
     public function processSignals(): void
     {
         foreach (DB::all("SELECT * FROM signals WHERE status = 'new' ORDER BY id") as $sig) {
-            $order = ['symbol' => $sig['symbol'], 'side' => $sig['side'], 'entry_lo' => (float)$sig['entry_lo'], 'entry_hi' => (float)$sig['entry_hi'],
-                'stop' => (float)$sig['stop_loss'], 'targets' => json_decode((string)$sig['targets'], true) ?: []];
-            $real = (bool)Settings::get('signal_real_enabled');
-            $chase = (float)Settings::get('signal_max_chase_pct');
+            $ch = $sig['channel_id'] ? DB::row('SELECT * FROM signal_channels WHERE id = ?', [(int)$sig['channel_id']]) : null;
+            // Реальные счета — только если разрешено и глобально, и у канала (канал без записи = старое поведение: глобальный флаг)
+            $real = (bool)Settings::get('signal_real_enabled') && (!$ch || $ch['mode'] === 'real');
+            $chase = $ch && $ch['max_chase_pct'] !== null ? (float)$ch['max_chase_pct'] : (float)Settings::get('signal_max_chase_pct');
+            $riskMult = $ch ? (float)$ch['risk_mult'] : 1.0;
+            $isUpdate = ($sig['kind'] ?? 'signal') === 'update';
+            $order = ['id' => (int)$sig['id'], 'channel_id' => $sig['channel_id'] !== null ? (int)$sig['channel_id'] : null, 'symbol' => $sig['symbol'], 'side' => $sig['side'],
+                'entry_lo' => (float)$sig['entry_lo'], 'entry_hi' => (float)$sig['entry_hi'], 'stop' => (float)$sig['stop_loss'],
+                'targets' => json_decode((string)$sig['targets'], true) ?: []];
             $opened = 0;
             $skipped = [];
             foreach ($this->workers as $uid => $w) {
@@ -452,9 +457,13 @@ final class Manager
                     continue;
                 }
                 try {
-                    $r = $w->signalOrder($order, $chase);
+                    $r = $isUpdate ? $w->signalUpdate($sig['symbol'], (string)$sig['action'], $order['channel_id'])
+                        : $w->signalOrder($order, $chase, $riskMult);
                 } catch (\Throwable $e) {
                     $r = ['status' => 'skipped', 'detail' => 'ошибка: ' . $e->getMessage()];
+                }
+                if ($isUpdate && $r['status'] === 'skipped' && str_starts_with($r['detail'], 'нет сделки')) {
+                    continue;                                   // у этого клиента сделки канала нет — не засоряем журнал
                 }
                 DB::insert('signal_orders', ['signal_id' => (int)$sig['id'], 'user_id' => $uid, 'status' => $r['status'], 'detail' => $r['detail'], 'created_at' => DB::now()]);
                 if ($r['status'] === 'opened') {
@@ -464,10 +473,10 @@ final class Manager
                 }
             }
             $why = $skipped ? ' Пропущено: ' . implode('; ', array_map(fn($k, $v) => "$k ($v)", array_keys($skipped), $skipped)) . '.' : '';
-            $summary = "открыто клиентам: $opened.$why";
+            $summary = ($isUpdate ? "применено у клиентов: $opened." : "открыто клиентам: $opened.") . $why;
             DB::update('signals', ['status' => 'processed', 'summary' => $summary], 'id = :id', [':id' => $sig['id']]);
             if ($sig['reply_chat']) {
-                Telegram::send((int)$sig['reply_chat'], "✅ Сигнал #{$sig['id']} {$sig['symbol']}: $summary");
+                Telegram::send((int)$sig['reply_chat'], "✅ " . ($isUpdate ? 'Обновление' : 'Сигнал') . " #{$sig['id']} {$sig['symbol']}: $summary");
             }
             Log::info("signal #{$sig['id']} {$sig['symbol']}: $summary");
         }

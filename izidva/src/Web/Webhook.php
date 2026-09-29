@@ -7,7 +7,7 @@ use App\DB;
 use App\Log;
 use App\Referral;
 use App\Settings;
-use App\SignalParser;
+use App\Signals;
 use App\Telegram;
 
 /** Обработка обновлений Telegram (webhook): /start, оплата подписки звёздами. */
@@ -27,8 +27,11 @@ final class Webhook
         if (!$m) {
             return;
         }
-        if (self::isSignalSource($m)) {
-            self::handleSignal($m);
+        if (trim((string)($m['text'] ?? '')) === '/id' && isset($m['from']['id'])) {
+            Telegram::send($m['chat']['id'], 'Ваш Telegram ID: <code>' . (int)$m['from']['id'] . '</code>');
+            return;
+        }
+        if (Signals::fromTelegram($m)) {
             return;
         }
         $from = $m['from'] ?? [];
@@ -63,63 +66,6 @@ final class Webhook
             $markup = Telegram::homeKeyboard();
             Telegram::send($m['chat']['id'], '📋 Меню', $markup ?: null);
         }
-    }
-
-    /** Сообщение из разрешённого источника сигналов: личка от вашего Telegram ID или пост разрешённого канала. */
-    private static function isSignalSource(array $m): bool
-    {
-        if (!Settings::get('signal_enabled')) {
-            return false;
-        }
-        $allowed = Settings::get('signal_allowed_ids');
-        $chat = $m['chat'] ?? [];
-        if (($chat['type'] ?? '') === 'channel') {
-            return in_array((string)($chat['id'] ?? ''), $allowed, true);
-        }
-        if (($chat['type'] ?? '') === 'private') {
-            $text = trim((string)($m['text'] ?? $m['caption'] ?? ''));
-            return in_array((string)($m['from']['id'] ?? ''), $allowed, true) && !str_starts_with($text, '/');
-        }
-        return false;
-    }
-
-    /** Разбор и постановка сигнала в очередь; исполнение клиентам — в демоне (Manager::processSignals). */
-    private static function handleSignal(array $m): void
-    {
-        $chat = $m['chat'];
-        $private = ($chat['type'] ?? '') === 'private';
-        $reply = $private ? (int)$chat['id'] : null;
-        $say = fn(string $t) => $reply ? Telegram::send($reply, $t) : null;
-        $text = trim((string)($m['text'] ?? $m['caption'] ?? ''));
-        $s = SignalParser::parse($text);
-        if ($s === null) {
-            $say('❔ Не распознал сигнал: нужны #МОНЕТА/USDT, ЛОНГ/ШОРТ, диапазон входа, цели и СТОП ЛОСС. Ничего не открыто.');
-            if (!$private) {
-                Log::info('signal: сообщение канала не похоже на сигнал, пропущено');
-            }
-            return;
-        }
-        $source = $private ? 'user:' . (int)($m['from']['id'] ?? 0) : 'channel:' . (int)$chat['id'];
-        $row = ['symbol' => $s['symbol'], 'side' => $s['side'], 'entry_lo' => $s['entry_lo'], 'entry_hi' => $s['entry_hi'], 'stop_loss' => $s['stop'],
-            'targets' => $s['targets'], 'channel_leverage' => $s['leverage'], 'raw_text' => mb_substr($text, 0, 2000), 'source' => $source,
-            'reply_chat' => $reply, 'created_at' => DB::now()];
-        $error = SignalParser::validate($s);
-        if ($error !== null) {
-            DB::insert('signals', $row + ['status' => 'rejected', 'summary' => $error]);
-            $say("⚠️ Сигнал {$s['symbol']} отклонён: $error. Ничего не открыто.");
-            return;
-        }
-        $mid = ($s['entry_lo'] + $s['entry_hi']) / 2;
-        $dupe = DB::val("SELECT id FROM signals WHERE symbol = ? AND side = ? AND status IN ('new','processed') AND created_at > ?
-            AND ABS((entry_lo + entry_hi) / 2 - ?) / ? < 0.015 LIMIT 1", [$s['symbol'], $s['side'], gmdate('Y-m-d H:i:s', time() - 12 * 3600), $mid, $mid]);
-        if ($dupe) {
-            DB::insert('signals', $row + ['status' => 'duplicate', 'summary' => "дубль сигнала #$dupe"]);
-            $say("♻️ {$s['symbol']}: дубль сигнала #$dupe (тот же вход за последние 12 часов) — второй раз не открываю.");
-            return;
-        }
-        $id = DB::insert('signals', $row + ['status' => 'new']);
-        $say("📡 Сигнал #$id принят: {$s['symbol']} " . ($s['side'] === 'Buy' ? 'LONG' : 'SHORT') . ", вход {$s['entry_lo']}–{$s['entry_hi']}, стоп {$s['stop']}, целей "
-            . count($s['targets']) . ". Исполняю клиентам, отчёт пришлю сюда.");
     }
 
     private static function paid(array $sp, int $fromId): void
