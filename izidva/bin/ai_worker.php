@@ -41,6 +41,10 @@ while (true) {
             DB::update('engine_commands', ['done_at' => DB::now()], 'id = :id', [':id' => $c['id']]);
             $force = true;
         }
+        if (!$settings['analysis_enabled']) {
+            sleep(20);                                          // анализ отключён в админке: Claude не вызываем ни для рынка, ни для разбора дня
+            continue;
+        }
         if ($ai->enabled()) {
             $state = json_decode((string)DB::val('SELECT state FROM engine_status WHERE id = 1'), true) ?: [];
             $lessons = array_reverse(array_column(DB::all('SELECT text FROM lessons ORDER BY id DESC LIMIT 10'), 'text'));

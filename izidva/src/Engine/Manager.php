@@ -90,21 +90,20 @@ final class Manager
         $this->processManualOrders();
         $this->market->tick();
         $this->processSignals();
-        $this->refreshFeatures();
-        if ($now - $this->ts['insights'] > 30) {
-            $this->loadInsights($now);
-            $this->ts['insights'] = $now;
+        $analysis = (bool)Settings::get('analysis_enabled');
+        if ($analysis) {
+            $this->refreshFeatures();
+            if ($now - $this->ts['insights'] > 30) {
+                $this->loadInsights($now);
+                $this->ts['insights'] = $now;
+            }
         }
         if ($now - $this->ts['sync'] > 10) {
             $this->syncWorkers();
             $this->ts['sync'] = $now;
         }
-        $halt = (bool)Settings::get('kill_switch');
-        $platform = ['grid' => (bool)Settings::get('strategy_grid_enabled'), 'trend' => (bool)Settings::get('strategy_trend_enabled'),
-            'liquidation' => (bool)Settings::get('strategy_liquidation_enabled'), 'breakout' => (bool)Settings::get('strategy_breakout_enabled')];
+        $this->applyModes($analysis);
         foreach ($this->workers as $uid => $w) {
-            $w->halted = $halt;
-            $w->platformEnabled = $platform;
             try {
                 $w->step($now);
             } catch (\Throwable $e) {
@@ -118,6 +117,28 @@ final class Manager
         }
         $this->ensureAiWorker();
         $this->daySummaries();
+    }
+
+    /**
+     * Глобальные режимы платформы на воркеры: аварийная остановка и разрешённые стратегии. Анализ выключен —
+     * все автостратегии запрещены, режим рынка принудительно NO_TRADE (ручная торговля и сигналы не затрагиваются).
+     */
+    private function applyModes(bool $analysis): void
+    {
+        $platform = $analysis
+            ? ['grid' => (bool)Settings::get('strategy_grid_enabled'), 'trend' => (bool)Settings::get('strategy_trend_enabled'),
+                'liquidation' => (bool)Settings::get('strategy_liquidation_enabled'), 'breakout' => (bool)Settings::get('strategy_breakout_enabled')]
+            : ['grid' => false, 'trend' => false, 'liquidation' => false, 'breakout' => false];
+        if (!$analysis) {
+            foreach ($this->market->symbols as $sym) {
+                $this->brain->regimes[$sym] = Regime::NO_TRADE;
+            }
+        }
+        $halt = (bool)Settings::get('kill_switch');
+        foreach ($this->workers as $w) {
+            $w->halted = $halt;
+            $w->platformEnabled = $platform;
+        }
     }
 
     // ───────────── рынок и ИИ ─────────────
@@ -290,6 +311,17 @@ final class Manager
             } elseif ($c['cmd'] === 'restart_engine') {
                 $this->stop = true;
                 $this->exitCode = RESTART_CODE;
+            } elseif ($c['cmd'] === 'reset_stats') {
+                try {
+                    if (strtotime($c['created_at'] . ' UTC') < time() - 600) {
+                        throw new \RuntimeException('команда просрочена (движок был остановлен) — повторите сброс');
+                    }
+                    $res = $this->resetStats(json_decode((string)$c['arg'], true) ?: []);
+                    DB::update('engine_commands', ['result' => 'ok: ' . $res], 'id = :id', [':id' => $c['id']]);
+                } catch (\Throwable $e) {
+                    Log::warn('reset_stats: ' . $e->getMessage());
+                    DB::update('engine_commands', ['result' => 'error: ' . $e->getMessage()], 'id = :id', [':id' => $c['id']]);
+                }
             } elseif ($c['cmd'] === 'edit_stops' || $c['cmd'] === 'cancel_order') {
                 $a = json_decode((string)$c['arg'], true) ?: [];
                 $w = $this->workers[(int)($a['user_id'] ?? 0)] ?? null;
@@ -352,6 +384,54 @@ final class Manager
                 $this->updateManualOrder((int)$o['id'], 'done', 'ордер уже не активен (исполнен или клиент офлайн)');
             }
         }
+    }
+
+    /**
+     * Обнуление показателей (команда из админки; выполняет демон — единственный, кто пишет сделки, поэтому гонок нет).
+     *  trading: сделки, обучение (strategy_stats и кэш), снимки баланса, сигналы, ручные ордера, состояние риска клиентов;
+     *           демо-балансы возвращаются к стартовому, воркеры пересоздаются с нуля. Позиции на биржах (demo/live) не трогаются.
+     *  finance: платежи и ручные доходы/расходы. Расходы на ИИ (ai_usage) НЕ трогаются никогда. Платежи не стираются, пока есть
+     *           неоплаченные реферальные начисления — они каскадно удаляются вместе с платежом, а это долг перед людьми.
+     * @param array{trading?:bool,finance?:bool} $opt
+     */
+    public function resetStats(array $opt): string
+    {
+        $done = [];
+        if (!empty($opt['finance'])) {
+            $unpaid = (float)DB::val('SELECT COALESCE(SUM(amount_usd), 0) FROM referral_earnings WHERE paid = 0');
+            if ($unpaid > 0) {
+                throw new \RuntimeException(sprintf('нельзя стереть платежи: есть неоплаченные реферальные начисления на %.2f$ — сначала отметьте их выплаченными', $unpaid));
+            }
+        }
+        if (!empty($opt['trading'])) {
+            foreach (array_keys($this->workers) as $uid) {
+                if ($this->workers[$uid]->ex->mode() !== 'paper') {
+                    $this->workers[$uid]->shutdown();            // реальные позиции остаются на бирже под своими стопами
+                }
+                unset($this->workers[$uid]);                      // бумажный счёт живёт только в памяти — просто отбрасываем
+            }
+            $n = [];
+            foreach (['trades', 'strategy_stats', 'equity_snapshots', 'signals', 'manual_orders'] as $t) {
+                $n[$t] = (int)DB::val("SELECT COUNT(*) FROM $t");
+                DB::q("DELETE FROM $t");
+            }
+            DB::q('DELETE FROM worker_state');
+            DB::q('UPDATE bot_settings SET paper_balance = ?', [(float)Settings::get('paper_start_balance')]);
+            $this->brain->learner->cache = [];
+            $this->ts['sync'] = 0;
+            $done[] = "торговля: сделок {$n['trades']}, снимков баланса {$n['equity_snapshots']}, сигналов {$n['signals']}, ручных ордеров {$n['manual_orders']}, записей обучения {$n['strategy_stats']}; демо-балансы = " . Settings::get('paper_start_balance') . '$';
+        }
+        if (!empty($opt['finance'])) {
+            $p = (int)DB::val('SELECT COUNT(*) FROM payments');
+            $f = (int)DB::val('SELECT COUNT(*) FROM finance_entries');
+            DB::q('DELETE FROM payments');
+            DB::q('DELETE FROM finance_entries');
+            $done[] = "финансы: платежей $p, ручных записей доходов/расходов $f";
+        }
+        if (!$done) {
+            throw new \RuntimeException('ничего не выбрано');
+        }
+        return implode('; ', $done) . '. Расходы на ИИ сохранены.';
     }
 
     /**

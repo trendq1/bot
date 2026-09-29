@@ -76,6 +76,7 @@ final class AdminApi
             ['GET', '/me'] => ['username' => $a, 'role' => $admin['role'] ?? 'admin'],
             ['GET', '/overview'] => self::overview(max(7, min(365, (int)($_GET['days'] ?? 30)))),
             ['GET', '/signals'] => self::signals(),
+            ['POST', '/maintenance/reset'] => self::maintenanceReset($b, $a),
             ['GET', '/orders/overview'] => self::ordersOverview((int)($_GET['user_id'] ?? 0)),
             ['GET', '/orders/command'] => self::commandResult((int)($_GET['id'] ?? 0)),
             ['POST', '/orders/edit'] => self::ordersEdit($b, $a),
@@ -304,6 +305,21 @@ final class AdminApi
      * По всем клиентам и режимам (live+paper) за период — чтобы сразу было видно, живёт ли математика в плюсе,
      * а не «выглядит прибыльно по количеству зелёных сделок».
      */
+    /** Обнулить показатели (кроме расходов на ИИ): ставит команду демону, результат — /orders/command. Только для роли admin. */
+    private static function maintenanceReset(array $b, string $admin): array
+    {
+        if (trim((string)($b['confirm'] ?? '')) !== 'ОБНУЛИТЬ') {
+            Api::fail(400, 'Для подтверждения введите слово ОБНУЛИТЬ');
+        }
+        $opt = ['trading' => (bool)($b['trading'] ?? false), 'finance' => (bool)($b['finance'] ?? false)];
+        if (!$opt['trading'] && !$opt['finance']) {
+            Api::fail(400, 'Выберите, что обнулить');
+        }
+        $id = DB::insert('engine_commands', ['cmd' => 'reset_stats', 'arg' => json_encode($opt), 'created_at' => DB::now()]);
+        self::audit($admin, 'maintenance.reset', json_encode($opt));
+        return ['ok' => true, 'command_id' => $id];
+    }
+
     private static function num(mixed $v): ?float
     {
         return $v === null || $v === '' ? null : (float)str_replace(',', '.', (string)$v);

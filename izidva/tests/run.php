@@ -1813,6 +1813,78 @@ test('админка: /orders/overview считает сводку и проце
     check($threw, 'отрицательная цена отклонена ещё в API');
 });
 
+echo "Обнуление показателей и отключение анализа\n";
+test('обнуление: торговля стирается, расходы на ИИ и настройки остаются, демо-балансы и обучение сброшены', function () {
+    $market = new Market(['SOLUSDT']);
+    $mgr = new Manager($market);
+    DB::insert('users', ['id' => 9941, 'first_name' => 'R', 'created_at' => DB::now(), 'blocked' => false]);
+    DB::q("INSERT INTO bot_settings (user_id, running, trading_mode, risk_profile, symbols, strategies, paper_balance) VALUES (9941, 1, 'paper', 'balanced', '[]', '{}', 777)
+           ON DUPLICATE KEY UPDATE paper_balance = 777");
+    DB::insert('trades', ['user_id' => 9941, 'symbol' => 'BTCUSDT', 'strategy' => 'grid', 'side' => 'Buy', 'qty' => 1, 'entry' => 1, 'exit' => 1, 'pnl' => 5, 'r' => 1,
+        'regime' => 'range', 'mode' => 'paper', 'opened_at' => DB::now(), 'closed_at' => DB::now()]);
+    DB::insert('ai_usage', ['ts' => DB::now(), 'model' => 'claude-opus-5', 'kind' => 'analyze', 'input_tokens' => 1, 'output_tokens' => 1,
+        'cache_read_tokens' => 0, 'cache_write_tokens' => 0, 'cost_usd' => 1.25]);
+    $aiBefore = (float)DB::val('SELECT SUM(cost_usd) FROM ai_usage');
+    $mgr->brain->learner->record('BTCUSDT', 'grid', 'range', 0.5, 1.0);
+    $paper = new PaperExchange(777);
+    $mgr->workers[9941] = new Worker(9941, $paper, $market, $mgr->brain, Risk::profile('balanced'), [], [], fn($u, $t) => null, fn($u, $m) => null, fn($u, $e) => null);
+    $res = $mgr->resetStats(['trading' => true]);
+    check((int)DB::val('SELECT COUNT(*) FROM trades') === 0 && (int)DB::val('SELECT COUNT(*) FROM strategy_stats') === 0, 'сделки и обучение стёрты');
+    check(!$mgr->brain->learner->cache && $mgr->workers === [], 'кэш обучения и воркеры сброшены (пересоздадутся с нуля)');
+    check(near((float)DB::val('SELECT paper_balance FROM bot_settings WHERE user_id = 9941'), (float)Settings::get('paper_start_balance')), 'демо-баланс вернулся к стартовому');
+    check(near((float)DB::val('SELECT SUM(cost_usd) FROM ai_usage'), $aiBefore), 'расходы на ИИ не тронуты');
+    check(str_contains($res, 'Расходы на ИИ сохранены'), 'итог сообщает, что расходы на ИИ сохранены');
+    $threw = false;
+    try { $mgr->resetStats([]); } catch (\RuntimeException) { $threw = true; }
+    check($threw, 'без выбранных опций ничего не делается');
+});
+test('обнуление финансов: платежи стираются, но не при неоплаченных реферальных начислениях; расходы на ИИ остаются', function () {
+    $market = new Market(['SOLUSDT']);
+    $mgr = new Manager($market);
+    DB::insert('users', ['id' => 9942, 'first_name' => 'Payer', 'created_at' => DB::now(), 'blocked' => false]);
+    DB::insert('users', ['id' => 9943, 'first_name' => 'Ref', 'created_at' => DB::now(), 'blocked' => false]);
+    $pid = DB::insert('payments', ['user_id' => 9942, 'plan' => 'month', 'stars' => 100, 'usd' => 15.0, 'charge_id' => 'rst-' . uniqid(), 'created_at' => DB::now()]);
+    DB::insert('referral_earnings', ['beneficiary_id' => 9943, 'from_user_id' => 9942, 'level' => 1, 'payment_id' => $pid, 'pct' => 20, 'amount_usd' => 3.0, 'paid' => 0, 'created_at' => DB::now()]);
+    $threw = false;
+    try { $mgr->resetStats(['finance' => true]); } catch (\RuntimeException $e) { $threw = str_contains($e->getMessage(), 'неоплаченные реферальные'); }
+    check($threw && (int)DB::val('SELECT COUNT(*) FROM payments WHERE id = ?', [$pid]) === 1, 'долг перед рефералами не стирается — платёж остался');
+    DB::q('UPDATE referral_earnings SET paid = 1');
+    $ai = (float)DB::val('SELECT SUM(cost_usd) FROM ai_usage');
+    $mgr->resetStats(['finance' => true]);
+    check((int)DB::val('SELECT COUNT(*) FROM payments') === 0 && (int)DB::val('SELECT COUNT(*) FROM finance_entries') === 0, 'после выплаты платежи и ручные записи стёрты');
+    check(near((float)DB::val('SELECT SUM(cost_usd) FROM ai_usage'), $ai), 'расходы на ИИ на месте');
+});
+test('обнуление через команду админки: нужно слово-подтверждение, устаревшая команда не выполняется', function () {
+    $threw = false;
+    try { (new ReflectionMethod(\App\Web\AdminApi::class, 'maintenanceReset'))->invoke(null, ['trading' => true, 'confirm' => 'да'], 't'); } catch (\Throwable) { $threw = true; }
+    check($threw, 'без слова ОБНУЛИТЬ — отказ');
+    $r = (new ReflectionMethod(\App\Web\AdminApi::class, 'maintenanceReset'))->invoke(null, ['trading' => true, 'confirm' => 'ОБНУЛИТЬ'], 't');
+    check($r['ok'] && DB::val('SELECT cmd FROM engine_commands WHERE id = ?', [$r['command_id']]) === 'reset_stats', 'команда поставлена демону');
+    $market = new Market(['SOLUSDT']);
+    $mgr = new Manager($market);
+    DB::q('UPDATE engine_commands SET created_at = ? WHERE id = ?', [gmdate('Y-m-d H:i:s', time() - 3600), $r['command_id']]);
+    DB::insert('users', ['id' => 9944, 'first_name' => 'Keep', 'created_at' => DB::now(), 'blocked' => false]);
+    DB::insert('trades', ['user_id' => 9944, 'symbol' => 'BTCUSDT', 'strategy' => 'grid', 'side' => 'Buy', 'qty' => 1, 'entry' => 1, 'exit' => 1, 'pnl' => 1, 'r' => 1,
+        'regime' => 'range', 'mode' => 'paper', 'opened_at' => DB::now(), 'closed_at' => DB::now()]);
+    (new ReflectionMethod(Manager::class, 'handleCommands'))->invoke($mgr);
+    check(str_contains((string)DB::val('SELECT result FROM engine_commands WHERE id = ?', [$r['command_id']]), 'просрочена') && (int)DB::val('SELECT COUNT(*) FROM trades WHERE user_id = 9944') === 1,
+        'команда старше 10 минут не выполняется и ничего не стирает');
+});
+test('отключение анализа: по умолчанию включён; в выключенном режиме воркерам запрещены все автостратегии, режим — NO_TRADE', function () {
+    check(Settings::get('analysis_enabled') === true, 'по умолчанию анализ включён');
+    Settings::save(['analysis_enabled' => false]);
+    $market = new Market(['SOLUSDT']);
+    $mgr = new Manager($market);
+    $w = new Worker(9950, new PaperExchange(1000), $market, $mgr->brain, Risk::profile('balanced'), ['SOLUSDT'], ['grid' => true, 'trend' => true, 'liquidation' => true],
+        fn($u, $t) => null, fn($u, $m) => null, fn($u, $e) => null);
+    $mgr->workers[9950] = $w;
+    $mgr->brain->regimes['SOLUSDT'] = Regime::RANGE;
+    (new ReflectionMethod(Manager::class, 'applyModes'))->invoke($mgr, false);
+    check($w->platformEnabled === ['grid' => false, 'trend' => false, 'liquidation' => false, 'breakout' => false], 'все автостратегии запрещены');
+    check(($mgr->brain->regimes['SOLUSDT'] ?? null) === Regime::NO_TRADE, 'режим рынка принудительно NO_TRADE');
+    Settings::save(['analysis_enabled' => true]);
+});
+
 echo "\n";
 if ($failed) {
     echo "ПРОВАЛЕНО: " . count($failed) . "\n  - " . implode("\n  - ", $failed) . "\n";

@@ -113,6 +113,7 @@ VIEWS.overview = async () => {
   const d = await api("/overview?days=" + days);
   const k = d.kpi;
   $("headActions").innerHTML = `<select id="ovDays">${[7, 30, 90, 365].map((x) => `<option value="${x}" ${x === days ? "selected" : ""}>${x} дней</option>`).join("")}</select>`;
+  analysisToggle().catch(() => {});
   $("ovDays").onchange = (e) => { localStorage.setItem("ovDays", e.target.value); go("overview"); };
   $("view").innerHTML = `
     <div class="grid kpis">
@@ -325,6 +326,8 @@ VIEWS.trades = async () => {
 VIEWS.ai = async () => {
   const d = await api("/ai");
   $("headActions").innerHTML = `<button class="btn primary" id="aiRun">🧠 Запустить анализ сейчас</button>`;
+  const analysisOn = await analysisToggle();
+  if (!analysisOn) $("aiRun").disabled = true;
   $("aiRun").onclick = async () => { try { await post("/ai/run"); toast("Анализ запущен — обновится в течение минуты"); } catch (e) { toast(e.message); } };
   const tun = Object.fromEntries(d.tuning.map((t) => [t.symbol, t.params]));
   const syms = d.symbols;
@@ -672,9 +675,49 @@ VIEWS.manual = async () => {
 };
 
 // ───────────── настройки ─────────────
+// Включатель анализа рынка: выключено — ИИ не вызывается и новых автосделок нет (ручная торговля и сигналы работают)
+async function analysisToggle() {
+  const fields = await api("/settings");
+  const on = fields.find((f) => f.key === "analysis_enabled")?.value !== false;
+  const btn = document.createElement("button");
+  btn.className = "btn " + (on ? "danger" : "primary");
+  btn.textContent = on ? "⏸ Отключить анализ" : "▶ Включить анализ";
+  btn.onclick = async () => {
+    if (on && !confirm("Отключить анализ рынка? ИИ перестанет вызываться, новых автоматических сделок не будет. Открытые позиции сопровождаются как обычно; ручная торговля и сигналы работают.")) return;
+    await api("/settings", { method: "PUT", body: JSON.stringify({ analysis_enabled: !on }) });
+    toast(on ? "Анализ отключён" : "Анализ включён"); go(current);
+  };
+  $("headActions").prepend(btn);
+  return on;
+}
+function resetDialog() {
+  $("modal").innerHTML = `<div class="head"><h2>Обнулить показатели</h2><button class="btn" id="mClose">✕</button></div>
+    <div class="muted small" style="margin-bottom:10px">Расходы на ИИ сохраняются всегда. Действие необратимо — сделайте резервную копию базы, если нужна история.</div>
+    <label class="row" style="gap:8px"><input type="checkbox" id="rsTrading" style="width:auto" checked> <b>Торговля</b></label>
+    <div class="muted small" style="margin:0 0 10px 26px">Сделки и PnL, обучение стратегий, история баланса, сигналы, ручные ордера, состояние риска; демо-балансы возвращаются к стартовому, демо-позиции закрываются. Позиции на биржах Bybit не трогаются.</div>
+    <label class="row" style="gap:8px"><input type="checkbox" id="rsFinance" style="width:auto"> <b>Финансы</b></label>
+    <div class="muted small" style="margin:0 0 10px 26px">Платежи за подписки (доход) и ручные записи доходов/расходов. Подписки клиентов не отменяются. Не сработает, пока есть неоплаченные реферальные начисления.</div>
+    <label>Для подтверждения введите ОБНУЛИТЬ<input class="inp" id="rsConfirm" autocomplete="off"></label>
+    <button class="btn danger big" id="rsGo">Обнулить</button>`;
+  $("modal").hidden = false; $("modalBg").hidden = false;
+  $("mClose").onclick = closeModal;
+  $("rsGo").onclick = async () => {
+    try {
+      const r = await post("/maintenance/reset", { trading: $("rsTrading").checked, finance: $("rsFinance").checked, confirm: $("rsConfirm").value });
+      closeModal(); toast("Отправлено движку…");
+      for (let i = 0; i < 30; i++) {
+        await new Promise((x) => setTimeout(x, 1000));
+        const c = await api("/orders/command?id=" + r.command_id);
+        if (c.done) { alert(c.result.startsWith("ok") ? "Готово: " + c.result.slice(4) : "Ошибка: " + c.result.replace(/^error: /, "")); go(current); return; }
+      }
+      toast("Команда отправлена, но движок не ответил за 30 секунд (остановлен?). Она выполнится при запуске, если пройдёт не более 10 минут.");
+    } catch (e) { toast(e.message); }
+  };
+}
 VIEWS.settings = async () => {
   const fields = await api("/settings");
-  $("headActions").innerHTML = `<button class="btn danger" id="restart">↻ Перезапустить торговый движок</button>`;
+  $("headActions").innerHTML = `<button class="btn danger" id="resetStats">🗑 Обнулить показатели</button> <button class="btn danger" id="restart">↻ Перезапустить торговый движок</button>`;
+  $("resetStats").onclick = resetDialog;
   $("restart").onclick = async () => {
     if (!confirm("Перезапустить движок? Сетки клиентов будут закрыты и через ~10 секунд запущены заново.")) return;
     await post("/system/restart"); toast("Команда отправлена — движок перезапустится в течение нескольких секунд");
