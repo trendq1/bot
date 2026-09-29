@@ -11,8 +11,18 @@ interface ExchangeInterface
 
     public function mode(): string;                         // paper | demo | live
     public function equity(): float;
-    /** @return array<string,array{side:string,qty:float,entry:float}> */
+    /**
+     * Ключи side/qty/entry обязательны; stop/take (null — нет), mark и upnl — для админки, если биржа их отдаёт.
+     * @return array<string,array{side:string,qty:float,entry:float,stop?:?float,take?:?float,mark?:?float,upnl?:?float}>
+     */
     public function positions(): array;
+    /**
+     * Открытые лимитные ордера клиента (все монеты) — для вкладки «Ордера и позиции».
+     * @return list<array{symbol:string,side:string,qty:float,price:float,reduce:bool,link:string}>
+     */
+    public function openOrders(): array;
+    /** Изменить стоп-лосс и тейк-профит позиции: null — снять, число — поставить. */
+    public function setTradingStop(string $symbol, ?string $stop, ?string $take): void;
     public function setLeverage(string $symbol, int $leverage): void;
     public function placeLimit(string $symbol, string $side, string $qty, string $price, string $linkId, bool $reduceOnly = false,
                                ?string $stop = null, ?string $take = null): void;

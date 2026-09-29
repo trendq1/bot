@@ -89,6 +89,9 @@ final class FakeLiveExchange implements ExchangeInterface
                                ?string $stop = null, ?string $take = null): void {}
     public function placeMarket(string $symbol, string $side, string $qty, ?string $stop = null, ?string $take = null, bool $reduceOnly = false): void {}
     public function setStopLoss(string $symbol, string $stop): void { $this->stopLosses[$symbol] = $stop; }
+    public function openOrders(): array { return []; }
+    public array $tradingStops = [];
+    public function setTradingStop(string $symbol, ?string $stop, ?string $take): void { $this->tradingStops[$symbol] = [$stop, $take]; }
     public function cancel(string $symbol, string $linkId): void { $this->cancelled[] = $linkId; }
     public function cancelAll(string $symbol): void {}
     public function openOrderIds(string $symbol): array { return []; }
@@ -1704,6 +1707,110 @@ test('Webhook: сигнал принимается только от разре�
     \App\Web\Webhook::handle(['channel_post' => ['text' => $SIG_SOL, 'chat' => ['id' => -999, 'type' => 'channel']]]);
     check((int)DB::val("SELECT COUNT(*) FROM signals") === $before + 4, 'пост чужого канала игнорируется');
     Settings::save(['signal_enabled' => false, 'signal_allowed_ids' => []]);
+});
+
+
+echo "Ордера и позиции (админка)\n";
+test('PaperExchange отдаёт для админки mark/upnl/SL/TP и открытые ордера; setTradingStop меняет и снимает уровни', function () {
+    $ex = new PaperExchange(1000);
+    $ex->updatePrices(['BTCUSDT' => 100000]);
+    $ex->placeMarket('BTCUSDT', 'Buy', '0.01', '99000', '105000');
+    $ex->placeLimit('BTCUSDT', 'Sell', '0.005', '104000', 'sigtp-1', true);
+    $ex->updatePrices(['BTCUSDT' => 101000]);
+    $p = $ex->positions()['BTCUSDT'];
+    check(near($p['upnl'], 0.01 * (101000 - $p['entry']), 1e-6) && $p['stop'] == 99000.0 && $p['take'] == 105000.0 && $p['mark'] == 101000.0, 'плавающий PnL, mark, SL, TP');
+    $o = $ex->openOrders();
+    check(count($o) === 1 && $o[0]['link'] === 'sigtp-1' && $o[0]['reduce'] === true && $o[0]['price'] === 104000.0, 'открытый ордер виден');
+    $ex->setTradingStop('BTCUSDT', '99500', null);
+    $p = $ex->positions()['BTCUSDT'];
+    check($p['stop'] === 99500.0 && $p['take'] === null, 'стоп изменён, тейк снят');
+});
+$edSetup = function () {
+    $btc = new Instrument('BTCUSDT', '0.1', '0.001', 0.001, 100, 5, 100);
+    $market = new Market(['BTCUSDT']);
+    $market->instruments['BTCUSDT'] = $btc;
+    $market->feeds['BTCUSDT']->price = 100000.0;
+    $ex = new PaperExchange(10000);
+    $ex->updatePrices(['BTCUSDT' => 100000.0]);
+    $notes = [];
+    $w = new Worker(830, $ex, $market, new Brain(new Learner(false)), Risk::profile('balanced'), ['BTCUSDT'],
+        ['grid' => true, 'trend' => true, 'liquidation' => true], function ($u, $t) {}, function ($u, $m) use (&$notes) { $notes[] = $m; }, function ($u, $e) {});
+    $w->manualOrder(['id' => 1, 'symbol' => 'BTCUSDT', 'side' => 'Buy', 'order_type' => 'market', 'qty' => 0.01, 'price' => null,
+        'stop_loss' => 98000, 'take_profit' => null, 'leverage' => null]);
+    return [$w, $ex, $market, &$notes];
+};
+test('Worker::editStops: меняет SL/TP, проверяет сторону, пустое значение снимает уровень, у сетки править нельзя', function () use ($edSetup) {
+    [$w, $ex] = $edSetup();
+    $r = $w->editStops('BTCUSDT', 99000.0, 105000.0);
+    check($ex->pos['BTCUSDT']['stop'] === 99000.0 && $ex->pos['BTCUSDT']['take'] === 105000.0 && str_contains($r, '99000'), 'SL и TP выставлены на бирже');
+    check($w->directional['BTCUSDT']['stop'] === 99000.0, 'внутреннее состояние обновлено');
+    $w->editStops('BTCUSDT', null, null);
+    check($ex->pos['BTCUSDT']['stop'] === null && $ex->pos['BTCUSDT']['take'] === null, 'оба уровня сняты');
+    foreach ([[101000.0, null, 'стоп выше цены у лонга'], [null, 99000.0, 'тейк ниже цены у лонга'], [-5.0, null, 'отрицательный стоп']] as [$sl, $tp, $why]) {
+        $threw = false;
+        try { $w->editStops('BTCUSDT', $sl, $tp); } catch (\RuntimeException) { $threw = true; }
+        check($threw, "отклонено: $why");
+    }
+    $threw = false;
+    try { $w->editStops('ETHUSDT', 1.0, null); } catch (\RuntimeException $e) { $threw = str_contains($e->getMessage(), 'нет открытой позиции'); }
+    check($threw, 'нет позиции — понятная ошибка');
+    $w->grids['BTCUSDT'] = new Grid($ex, 'BTCUSDT', new Instrument('BTCUSDT', '0.1', '0.001', 0.001, 100, 5, 100), ['mode' => 'long', 'center' => 100000.0, 'step_pct' => 0.5, 'levels' => 3, 'qty' => '0.01', 'max_loss' => 5.0]);
+    $threw = false;
+    try { $w->editStops('BTCUSDT', 99000.0, null); } catch (\RuntimeException $e) { $threw = str_contains($e->getMessage(), 'сетка'); }
+    check($threw, 'позиция сетки не редактируется — стоп ведёт сама сетка');
+});
+test('Worker::cancelOrder: снимает лимитку входа/цель, ордер сетки трогать нельзя, лишнее — ошибка', function () use ($edSetup) {
+    [$w, $ex] = $edSetup();
+    $w->closeManual('BTCUSDT');
+    $w->directional = [];                                        // запись о закрытой позиции движок снимет на следующем такте
+    $w->manualOrder(['id' => 2, 'symbol' => 'BTCUSDT', 'side' => 'Buy', 'order_type' => 'limit', 'qty' => 0.01, 'price' => 99000, 'stop_loss' => null, 'take_profit' => null, 'leverage' => null]);
+    $link = $w->pendingManual['BTCUSDT']['link'];
+    $view = (new ReflectionMethod(Worker::class, 'liveExchangeView'))->invoke($w);
+    check(count($view['orders']) === 1 && $view['orders'][0]['origin'] === 'manual' && $view['orders'][0]['cancelable'] === true, 'ордер виден в живом состоянии как ручной');
+    $w->cancelOrder('BTCUSDT', $link);
+    check($ex->openOrders() === [] && !isset($w->pendingManual['BTCUSDT']), 'ордер снят на бирже и в памяти');
+    $threw = false;
+    try { $w->cancelOrder('BTCUSDT', $link); } catch (\RuntimeException) { $threw = true; }
+    check($threw, 'повторная отмена — понятная ошибка');
+    $grid = new Grid($ex, 'BTCUSDT', new Instrument('BTCUSDT', '0.1', '0.001', 0.001, 100, 5, 100), ['mode' => 'long', 'center' => 100000.0, 'step_pct' => 0.5, 'levels' => 3, 'qty' => '0.01', 'max_loss' => 5.0]);
+    $grid->start();
+    $w->grids['BTCUSDT'] = $grid;
+    $gl = (string)array_key_first($grid->orders);
+    $threw = false;
+    try { $w->cancelOrder('BTCUSDT', $gl); } catch (\RuntimeException $e) { $threw = str_contains($e->getMessage(), 'сетки'); }
+    check($threw, 'ордер сетки снять нельзя');
+});
+test('движок: команды edit_stops / cancel_order пишут результат для админки', function () use ($edSetup) {
+    [$w, $ex] = $edSetup();
+    $market = new Market(['BTCUSDT']);
+    $mgr = new Manager($market);
+    $mgr->workers[830] = $w;
+    $ok = DB::insert('engine_commands', ['cmd' => 'edit_stops', 'arg' => json_encode(['user_id' => 830, 'symbol' => 'BTCUSDT', 'stop' => 99500.0, 'take' => 103000.0]), 'created_at' => DB::now()]);
+    $bad = DB::insert('engine_commands', ['cmd' => 'edit_stops', 'arg' => json_encode(['user_id' => 830, 'symbol' => 'BTCUSDT', 'stop' => 101000.0, 'take' => null]), 'created_at' => DB::now()]);
+    $off = DB::insert('engine_commands', ['cmd' => 'cancel_order', 'arg' => json_encode(['user_id' => 999, 'symbol' => 'BTCUSDT', 'link' => 'x']), 'created_at' => DB::now()]);
+    (new ReflectionMethod(Manager::class, 'handleCommands'))->invoke($mgr);
+    check(str_starts_with((string)DB::val('SELECT result FROM engine_commands WHERE id = ?', [$ok]), 'ok') && $ex->pos['BTCUSDT']['take'] === 103000.0, 'успех: результат ok, уровни на бирже');
+    check(str_contains((string)DB::val('SELECT result FROM engine_commands WHERE id = ?', [$bad]), 'ниже'), 'ошибка проверки доходит до админки текстом');
+    check(str_contains((string)DB::val('SELECT result FROM engine_commands WHERE id = ?', [$off]), 'не подключён'), 'клиент офлайн — понятный результат');
+});
+test('админка: /orders/overview считает сводку и проценты, edit/cancel ставят команды, trader-роль допущена', function () use ($edSetup) {
+    DB::insert('users', ['id' => 9931, 'first_name' => 'Ord', 'created_at' => DB::now(), 'blocked' => false]);
+    DB::insert('bot_settings', ['user_id' => 9931, 'running' => true, 'trading_mode' => 'paper', 'risk_profile' => 'balanced', 'symbols' => ['BTCUSDT'], 'strategies' => ['grid' => true], 'paper_balance' => 1000]);
+    DB::insert('trades', ['user_id' => 9931, 'symbol' => 'BTCUSDT', 'strategy' => 'signal', 'side' => 'Buy', 'qty' => 1, 'entry' => 1, 'exit' => 1, 'pnl' => 12.5, 'r' => 1, 'regime' => 'signal',
+        'mode' => 'paper', 'opened_at' => DB::now(), 'closed_at' => DB::now()]);
+    $live = ['positions' => [['symbol' => 'BTCUSDT', 'side' => 'Buy', 'qty' => 0.01, 'entry' => 100000, 'mark' => 101000, 'stop' => 99000, 'take' => null,
+        'upnl' => 10.0, 'pnl_pct' => 1.0, 'pct_equity' => 1.0, 'strategy' => 'manual', 'editable' => true]], 'orders' => []];
+    DB::q('INSERT INTO worker_state (user_id, status, equity, day_pnl_pct, live, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE live = VALUES(live), equity = VALUES(equity), updated_at = VALUES(updated_at)',
+        [9931, 'ok', 1000.0, 0.5, json_encode($live), DB::now()]);
+    $o = (new ReflectionMethod(\App\Web\AdminApi::class, 'ordersOverview'))->invoke(null, 9931);
+    check($o['summary']['equity'] == 1000.0 && $o['summary']['upnl'] == 10.0 && $o['summary']['upnl_pct'] == 1.0, 'баланс, плавающий PnL и его % от баланса');
+    check($o['summary']['realized_today'] == 12.5 && $o['summary']['realized_30d_pct'] == 1.25 && $o['summary']['win_rate_30d'] == 100.0, 'реализованное сегодня/30д, % и win rate');
+    check(count($o['positions']) === 1 && $o['positions'][0]['client'] === 'Ord' && count($o['recent_trades']) === 1, 'позиция с именем клиента и история сделок');
+    $e = (new ReflectionMethod(\App\Web\AdminApi::class, 'ordersEdit'))->invoke(null, ['user_id' => 9931, 'symbol' => 'btcusdt', 'stop_loss' => '99 500,5', 'take_profit' => ''], 'tester');
+    check($e['ok'] && str_contains((string)DB::val('SELECT arg FROM engine_commands WHERE id = ?', [$e['command_id']]), '"take":null'), 'edit ставит команду; пустой TP = снять');
+    $threw = false;
+    try { (new ReflectionMethod(\App\Web\AdminApi::class, 'ordersEdit'))->invoke(null, ['user_id' => 9931, 'symbol' => 'BTCUSDT', 'stop_loss' => '-1'], 'tester'); } catch (\Throwable) { $threw = true; }
+    check($threw, 'отрицательная цена отклонена ещё в API');
 });
 
 echo "\n";

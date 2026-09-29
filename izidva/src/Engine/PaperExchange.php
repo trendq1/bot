@@ -125,10 +125,31 @@ final class PaperExchange implements ExchangeInterface
         $out = [];
         foreach ($this->pos as $s => $p) {
             if ($p['size'] != 0) {
-                $out[$s] = ['side' => $p['size'] > 0 ? 'Buy' : 'Sell', 'qty' => abs($p['size']), 'entry' => $p['entry']];
+                $mark = $this->prices[$s] ?? $p['entry'];
+                $out[$s] = ['side' => $p['size'] > 0 ? 'Buy' : 'Sell', 'qty' => abs($p['size']), 'entry' => $p['entry'],
+                    'stop' => $p['stop'], 'take' => $p['take'], 'mark' => $mark, 'upnl' => $p['size'] * ($mark - $p['entry'])];
             }
         }
         return $out;
+    }
+
+    public function openOrders(): array
+    {
+        $out = [];
+        foreach ($this->orders as $symbol => $list) {
+            foreach ($list as $link => $o) {
+                $out[] = ['symbol' => $symbol, 'side' => $o['side'], 'qty' => $o['qty'], 'price' => $o['price'], 'reduce' => (bool)$o['reduce'], 'link' => (string)$link];
+            }
+        }
+        return $out;
+    }
+
+    public function setTradingStop(string $symbol, ?string $stop, ?string $take): void
+    {
+        if (isset($this->pos[$symbol]) && $this->pos[$symbol]['size'] != 0) {
+            $this->pos[$symbol]['stop'] = $stop !== null ? (float)$stop : null;
+            $this->pos[$symbol]['take'] = $take !== null ? (float)$take : null;
+        }
     }
 
     public function setLeverage(string $symbol, int $leverage): void {}

@@ -58,7 +58,7 @@ function start(name, role) {
   $("meName").textContent = "👤 " + name + (myRole === "trader" ? " · трейдер" : "");
   $("loginView").hidden = true; $("appView").hidden = false;
   if (myRole === "trader") {
-    document.querySelectorAll("#nav button").forEach((b) => (b.hidden = b.dataset.v !== "manual"));
+    document.querySelectorAll("#nav button").forEach((b) => (b.hidden = !["manual", "orders"].includes(b.dataset.v)));
     go("manual");
     return;
   }
@@ -437,6 +437,94 @@ VIEWS.menu = async () => {
     if (!confirm("Удалить кнопку?")) return;
     try { await api("/menu/" + b.dataset.del, { method: "DELETE" }); go("menu"); } catch (e) { toast(e.message); }
   }));
+};
+
+
+// ───────────── ордера и позиции ─────────────
+let ordTimer = null;
+const ORD_ORIGIN = { target: "цель сигнала", signal: "вход по сигналу", manual: "ручной вход", grid: "сетка", other: "прочее" };
+const POS_KIND = { grid: "сетка", trend: "тренд", breakout: "пробой", liquidation: "ликвидации", signal: "сигнал", manual: "вручную", external: "вне бота" };
+const pct = (v, sign = true) => (v == null ? "—" : (sign && v > 0 ? "+" : "") + Number(v).toFixed(2) + " %");
+const px = (v) => (v == null || v === 0 ? "—" : String(Number(Number(v).toPrecision(7))));
+VIEWS.orders = async () => {
+  clearInterval(ordTimer);
+  const clients = await api("/manual/clients");
+  $("view").innerHTML = `
+    <div class="card"><div class="row"><label style="flex:1">Клиент<select id="odClient"><option value="0">Все клиенты</option>${clients.map((c) => `<option value="${c.id}">${esc(c.name)} · ${c.trading_mode === "exchange" ? (c.exchange || "биржа") : "демо"}${c.running ? "" : " · бот остановлен"}</option>`).join("")}</select></label>
+      <span class="muted small" id="odStamp" style="align-self:flex-end">обновляется каждые 5 с</span></div></div>
+    <div class="grid kpis" id="odKpis"></div>
+    <div class="card"><h3>Открытые позиции</h3><div id="odPos">Загрузка…</div></div>
+    <div class="card"><h3>Открытые ордера</h3><div id="odOrd"></div></div>
+    <div class="card" id="odCliCard"><h3>Доходность по клиентам</h3><div id="odCli"></div></div>
+    <div class="card"><h3>Последние закрытые сделки</h3><div id="odHist"></div></div>`;
+  let data = null;
+  const uid = () => Number($("odClient").value);
+  const names = () => Object.fromEntries((data?.clients || []).map((c) => [c.id, c.name]));
+  async function waitCommand(id) {
+    for (let i = 0; i < 12; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const c = await api("/orders/command?id=" + id);
+      if (c.done) { toast(c.result.startsWith("ok") ? "Готово: " + c.result.slice(4) : c.result.replace(/^error: /, "Ошибка: ")); load(); return; }
+    }
+    toast("Команда отправлена, движок ещё не ответил (бот остановлен?)");
+  }
+  async function send(path, body) {
+    try { const r = await post(path, body); toast("Отправлено движку…"); waitCommand(r.command_id); } catch (e) { toast(e.message); }
+  }
+  function editDialog(p) {
+    $("modal").innerHTML = `<div class="head"><h2>${esc(p.symbol)} · ${p.side === "Buy" ? "LONG" : "SHORT"} <span class="muted small">${esc(p.client)}</span></h2><button class="btn" id="mClose">✕</button></div>
+      <div class="muted small" style="margin-bottom:10px">Вход ${px(p.entry)} · сейчас ${px(p.mark)}. Пустое поле — снять уровень.</div>
+      <div class="grid2"><label>Стоп-лосс<input class="inp" id="edSl" type="number" step="any" value="${p.stop ?? ""}"></label>
+      <label>Тейк-профит<input class="inp" id="edTp" type="number" step="any" value="${p.take ?? ""}"></label></div>
+      <button class="btn primary big" id="edSave">Сохранить</button>`;
+    $("modal").hidden = false; $("modalBg").hidden = false;
+    $("mClose").onclick = closeModal;
+    $("edSave").onclick = () => { closeModal(); send("/orders/edit", { user_id: p.user_id, symbol: p.symbol, stop_loss: $("edSl").value, take_profit: $("edTp").value }); };
+  }
+  function draw() {
+    const s = data.summary, one = uid() !== 0;
+    $("odKpis").innerHTML = `
+      ${kpi("Баланс", usd(s.equity), one ? "" : `клиентов: ${s.clients}`)}
+      ${kpi("Плавающий PnL", usd(s.upnl, true), pct(s.upnl_pct) + " от баланса", cls(s.upnl))}
+      ${kpi("Реализовано сегодня", usd(s.realized_today, true), "", cls(s.realized_today))}
+      ${kpi("Реализовано 7 дней", usd(s.realized_7d, true), "", cls(s.realized_7d))}
+      ${kpi("Реализовано 30 дней", usd(s.realized_30d, true), pct(s.realized_30d_pct) + " от баланса", cls(s.realized_30d))}
+      ${kpi("Win Rate 30 дней", s.win_rate_30d == null ? "—" : s.win_rate_30d + " %", `сделок: ${s.trades_30d}`)}
+      ${kpi("Открыто", `${s.positions} поз. / ${s.orders} орд.`, "")}`;
+    $("odPos").innerHTML = table(["Клиент", "Монета", "Сторона", "Стратегия", "Объём", "Вход", "Цена", "SL", "TP", "PnL $", "PnL %", "% баланса", ""],
+      data.positions.map((p, i) => `<tr><td>${esc(p.client)}</td><td><b>${esc(p.symbol)}</b></td><td>${p.side === "Buy" ? "LONG" : "SHORT"}</td><td><span class="tag">${POS_KIND[p.strategy] || esc(p.strategy)}</span></td>
+        <td class="num">${p.qty}</td><td class="num">${px(p.entry)}</td><td class="num">${px(p.mark)}</td><td class="num">${px(p.stop)}</td><td class="num">${px(p.take)}</td>
+        <td class="num ${cls(p.upnl)}">${usd(p.upnl, true)}</td><td class="num ${cls(p.pnl_pct)}">${pct(p.pnl_pct)}</td><td class="num ${cls(p.pct_equity)}">${pct(p.pct_equity)}</td>
+        <td style="white-space:nowrap">${p.editable ? `<button class="btn" data-edit="${i}">✎ SL/TP</button> ` : ""}<button class="btn danger" data-close="${i}">Закрыть</button></td></tr>`));
+    $("odOrd").innerHTML = table(["Клиент", "Монета", "Сторона", "Тип", "Объём", "Цена", "Откуда", ""],
+      data.orders.map((o, i) => `<tr><td>${esc(o.client)}</td><td><b>${esc(o.symbol)}</b></td><td>${o.side === "Buy" ? "Buy" : "Sell"}</td><td>${o.reduce ? "закрывающий" : "вход"}</td>
+        <td class="num">${o.qty}</td><td class="num">${px(o.price)}</td><td><span class="tag">${ORD_ORIGIN[o.origin] || o.origin}</span></td>
+        <td>${o.cancelable ? `<button class="btn danger" data-cancel="${i}">Снять</button>` : '<span class="muted small">ведёт сетка</span>'}</td></tr>`));
+    $("odCliCard").hidden = one;
+    $("odCli").innerHTML = table(["Клиент", "Счёт", "Бот", "Баланс", "Плавающий", "%", "День %", "Реализ. 7д", "Реализ. 30д", "% за 30д", "С начала учёта %", "Поз./орд."],
+      data.clients.map((c) => `<tr class="click" data-cli="${c.id}"><td>${esc(c.name)}</td><td>${c.account}</td><td>${c.online ? '<span class="tag ok">онлайн</span>' : '<span class="tag">офлайн</span>'}</td>
+        <td class="num">${usd(c.equity)}</td><td class="num ${cls(c.upnl)}">${usd(c.upnl, true)}</td><td class="num ${cls(c.upnl_pct)}">${pct(c.upnl_pct)}</td>
+        <td class="num ${cls(c.day_pct)}">${pct(c.day_pct)}</td><td class="num ${cls(c.realized_7d)}">${usd(c.realized_7d, true)}</td><td class="num ${cls(c.realized_30d)}">${usd(c.realized_30d, true)}</td>
+        <td class="num ${cls(c.realized_30d_pct)}">${pct(c.realized_30d_pct)}</td><td class="num ${cls(c.roi_pct)}">${pct(c.roi_pct)}</td><td class="num">${c.positions} / ${c.orders}</td></tr>`));
+    $("odCli").querySelectorAll("tr.click").forEach((tr) => (tr.onclick = () => { $("odClient").value = tr.dataset.cli; load(); }));
+    const nm = names();
+    $("odHist").innerHTML = table(["Когда", "Клиент", "Монета", "Стратегия", "Сторона", "Вход → выход", "PnL"], data.recent_trades.map((t) => `<tr><td>${dt(t.at)}</td><td>${esc(nm[t.user_id] || t.user_id)}</td><td>${esc(t.symbol)}</td>
+      <td><span class="tag">${STRAT[t.strategy] || esc(t.strategy)}</span></td><td>${t.side === "Buy" ? "LONG" : "SHORT"}</td><td class="num">${px(t.entry)} → ${px(t.exit)}</td><td class="num ${cls(t.pnl)}">${usd(t.pnl, true)}</td></tr>`));
+    $("odPos").querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => editDialog(data.positions[b.dataset.edit])));
+    $("odPos").querySelectorAll("[data-close]").forEach((b) => (b.onclick = () => {
+      const p = data.positions[b.dataset.close];
+      if (confirm(`Закрыть ${p.symbol} у клиента ${p.client} по рынку?${p.strategy === "grid" ? " Сетка будет свёрнута." : ""}`)) send("/manual/close", { user_id: p.user_id, symbol: p.symbol });
+    }));
+    $("odOrd").querySelectorAll("[data-cancel]").forEach((b) => (b.onclick = () => {
+      const o = data.orders[b.dataset.cancel];
+      if (confirm(`Снять ордер ${o.symbol} ${o.side} ${o.qty} @ ${px(o.price)}?`)) send("/orders/cancel", { user_id: o.user_id, symbol: o.symbol, link: o.link });
+    }));
+    $("odStamp").textContent = "обновлено " + new Date().toLocaleTimeString("ru-RU");
+  }
+  async function load() { data = await api("/orders/overview?user_id=" + uid()); draw(); }
+  $("odClient").onchange = load;
+  await load();
+  ordTimer = setInterval(() => { if (current === "orders" && $("modal").hidden) load().catch(() => {}); }, 5000);
 };
 
 // ───────────── ручная торговля ─────────────

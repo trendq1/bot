@@ -290,18 +290,36 @@ final class Manager
             } elseif ($c['cmd'] === 'restart_engine') {
                 $this->stop = true;
                 $this->exitCode = RESTART_CODE;
+            } elseif ($c['cmd'] === 'edit_stops' || $c['cmd'] === 'cancel_order') {
+                $a = json_decode((string)$c['arg'], true) ?: [];
+                $w = $this->workers[(int)($a['user_id'] ?? 0)] ?? null;
+                try {
+                    if (!$w) {
+                        throw new \RuntimeException('клиент не подключён — бот остановлен или биржа не подключена');
+                    }
+                    $res = $c['cmd'] === 'edit_stops'
+                        ? $w->editStops((string)$a['symbol'], isset($a['stop']) ? (float)$a['stop'] : null, isset($a['take']) ? (float)$a['take'] : null)
+                        : $w->cancelOrder((string)$a['symbol'], (string)$a['link']);
+                    DB::update('engine_commands', ['result' => 'ok: ' . $res], 'id = :id', [':id' => $c['id']]);
+                } catch (\Throwable $e) {
+                    DB::update('engine_commands', ['result' => 'error: ' . $e->getMessage()], 'id = :id', [':id' => $c['id']]);
+                }
             } elseif ($c['cmd'] === 'manual_close') {
                 [$uid, $sym] = array_pad(explode(':', (string)$c['arg'], 2), 2, '');
                 $w = $this->workers[(int)$uid] ?? null;
-                if ($w) {
-                    try {
-                        $w->closeManual($sym);
-                    } catch (\Throwable $e) {
-                        Log::warn("manual_close user $uid $sym: " . $e->getMessage());
+                try {
+                    if (!$w) {
+                        throw new \RuntimeException('клиент не подключён — бот остановлен или биржа не подключена');
                     }
+                    $w->closeManual($sym);
+                    DB::update('engine_commands', ['result' => 'ok: закрытие отправлено'], 'id = :id', [':id' => $c['id']]);
+                } catch (\Throwable $e) {
+                    Log::warn("manual_close user $uid $sym: " . $e->getMessage());
+                    DB::update('engine_commands', ['result' => 'error: ' . $e->getMessage()], 'id = :id', [':id' => $c['id']]);
                 }
             }
             $this->ts['sync'] = 0;
+            $this->ts['publish'] = 0;                        // админка сразу увидит результат команды
         }
     }
 

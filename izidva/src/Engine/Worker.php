@@ -98,6 +98,8 @@ final class Worker
     private float $equityTs = 0.0;
     private float $snapTs = 0.0;
     private array $leverageSet = [];
+    private array $viewCache = [];
+    private float $viewCacheTs = 0.0;
 
     /**
      * @param callable(int,array):void $record   запись закрытой сделки
@@ -805,6 +807,67 @@ final class Worker
     }
 
     /**
+     * Изменить SL/TP открытой позиции по команде трейдера. null — снять уровень. Проверяет сторону относительно текущей
+     * цены. У позиции сетки стоп ведёт сама сетка (иначе разойдётся с её логикой) — редактировать нельзя.
+     */
+    public function editStops(string $sym, ?float $stop, ?float $take): string
+    {
+        if (isset($this->grids[$sym])) {
+            throw new \RuntimeException('по монете работает сетка — её стоп и цели задаёт план сетки; закройте сетку целиком');
+        }
+        $pos = $this->ex->positions()[$sym] ?? null;
+        if (!$pos) {
+            throw new \RuntimeException("по $sym нет открытой позиции");
+        }
+        if (!$this->market->ensureSymbol($sym)) {
+            throw new \RuntimeException("не удалось получить данные по $sym");
+        }
+        $inst = $this->market->instruments[$sym];
+        $price = (float)($pos['mark'] ?? $this->market->feeds[$sym]->price ?? $pos['entry']);
+        $long = $pos['side'] === 'Buy';
+        if ($stop !== null && ($stop <= 0 || ($long ? $stop >= $price : $stop <= $price))) {
+            throw new \RuntimeException('стоп-лосс должен быть ' . ($long ? 'ниже' : 'выше') . ' текущей цены ' . self::fmt($price));
+        }
+        if ($take !== null && ($take <= 0 || ($long ? $take <= $price : $take >= $price))) {
+            throw new \RuntimeException('тейк-профит должен быть ' . ($long ? 'выше' : 'ниже') . ' текущей цены ' . self::fmt($price));
+        }
+        $stopStr = $stop !== null ? (string)$inst->roundPrice($stop, !$long) : null;
+        $takeStr = $take !== null ? (string)$inst->roundPrice($take, $long) : null;
+        $this->ex->setTradingStop($sym, $stopStr, $takeStr);
+        if (isset($this->directional[$sym])) {
+            $this->directional[$sym]['stop'] = $stopStr !== null ? (float)$stopStr : 0.0;
+            $this->directional[$sym]['take'] = $takeStr !== null ? (float)$takeStr : null;
+            if ($stopStr !== null && $this->directional[$sym]['risk_usd'] > 0) {
+                $this->directional[$sym]['trail_be'] = true;    // стоп задан вручную — автоматика его не «улучшает» задним числом
+            }
+        }
+        $this->viewCacheTs = 0.0;
+        ($this->notify)($this->userId, "🖐 Трейдер изменил $sym: SL " . ($stopStr ?? 'снят') . ', TP ' . ($takeStr ?? 'снят'));
+        return 'SL ' . ($stopStr ?? 'снят') . ', TP ' . ($takeStr ?? 'снят');
+    }
+
+    /** Снять один открытый ордер по команде трейдера (лимитка входа, цель сигнала). Ордера сетки ведёт сама сетка. */
+    public function cancelOrder(string $sym, string $link): string
+    {
+        if (isset($this->grids[$sym]) && isset($this->grids[$sym]->orders[$link])) {
+            throw new \RuntimeException('это ордер сетки — снимите сетку целиком кнопкой «Закрыть»');
+        }
+        $known = false;
+        foreach ($this->ex->openOrders() as $o) {
+            $known = $known || ($o['symbol'] === $sym && $o['link'] === $link);
+        }
+        if (!$known) {
+            throw new \RuntimeException('ордер уже не активен (исполнен или снят)');
+        }
+        $this->ex->cancel($sym, $link);
+        if (($this->pendingManual[$sym]['link'] ?? null) === $link) {
+            unset($this->pendingManual[$sym]);
+        }
+        $this->viewCacheTs = 0.0;
+        return 'ордер снят';
+    }
+
+    /**
      * Ручной ордер трейдера из админ-панели: монета, рынок/лимит, тейк/стоп, плечо.
      * @param array{symbol:string,side:string,order_type:string,qty:float,price:?float,stop_loss:?float,take_profit:?float,leverage:?int,id:int} $o
      * @return array{status:string,detail:string}
@@ -1076,9 +1139,44 @@ final class Worker
         // Уведомления о входах/выходах и паузе в Telegram отключены — клиент смотрит сделки и статус в приложении.
     }
 
+    /** Позиции и открытые ордера с плавающим результатом — для вкладки «Ордера и позиции» (кэш на несколько секунд). */
+    private function liveExchangeView(): array
+    {
+        $now = microtime(true);
+        if ($this->viewCache && $now - $this->viewCacheTs < 8) {
+            return $this->viewCache;
+        }
+        $positions = [];
+        $orders = [];
+        try {
+            foreach ($this->ex->positions() as $sym => $p) {
+                $d = $this->directional[$sym] ?? null;
+                $mark = $p['mark'] ?? ($this->market->feeds[$sym]->price ?? null) ?: $p['entry'];
+                $sign = $p['side'] === 'Buy' ? 1 : -1;
+                $upnl = $p['upnl'] ?? $sign * ($mark - $p['entry']) * $p['qty'];
+                $kind = isset($this->grids[$sym]) ? 'grid' : ($d['strategy'] ?? 'external');
+                $positions[] = ['symbol' => $sym, 'side' => $p['side'], 'qty' => $p['qty'], 'entry' => $p['entry'], 'mark' => $mark,
+                    'stop' => $p['stop'] ?? ($d['stop'] ?? null) ?: null, 'take' => $p['take'] ?? null,
+                    'upnl' => round($upnl, 4), 'pnl_pct' => $p['entry'] > 0 ? round($sign * ($mark / $p['entry'] - 1) * 100, 3) : 0.0,
+                    'pct_equity' => $this->equity > 0 ? round($upnl / $this->equity * 100, 3) : 0.0,
+                    'strategy' => $kind, 'editable' => $kind !== 'grid'];
+            }
+            foreach ($this->ex->openOrders() as $o) {
+                $link = $o['link'];
+                $origin = str_starts_with($link, 'sigtp-') ? 'target' : (str_starts_with($link, 'sig-') ? 'signal'
+                    : (str_starts_with($link, 'manual-') ? 'manual' : (isset($this->grids[$o['symbol']]) ? 'grid' : 'other')));
+                $orders[] = $o + ['origin' => $origin, 'cancelable' => $origin !== 'grid'];
+            }
+        } catch (\Throwable $e) {
+            Log::warn("user {$this->userId}: состояние для админки не собралось: " . $e->getMessage());
+        }
+        $this->viewCacheTs = $now;
+        return $this->viewCache = ['positions' => $positions, 'orders' => $orders];
+    }
+
     public function liveState(): array
     {
-        return [
+        return $this->liveExchangeView() + [
             'grids' => array_map(fn($s, $g) => ['symbol' => $s, 'mode' => $g->plan['mode'], 'step_pct' => round($g->plan['step_pct'], 3),
                 'filled' => count($g->inventory), 'levels' => $g->plan['levels']], array_keys($this->grids), array_values($this->grids)),
             'directional' => array_map(fn($s, $d) => ['symbol' => $s, 'strategy' => $d['strategy'], 'side' => $d['side'],

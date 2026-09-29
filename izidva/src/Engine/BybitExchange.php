@@ -43,10 +43,34 @@ final class BybitExchange implements ExchangeInterface
         $out = [];
         foreach ($r['list'] ?? [] as $p) {
             if ((float)$p['size'] > 0) {
-                $out[$p['symbol']] = ['side' => $p['side'], 'qty' => (float)$p['size'], 'entry' => (float)$p['avgPrice']];
+                $out[$p['symbol']] = ['side' => $p['side'], 'qty' => (float)$p['size'], 'entry' => (float)$p['avgPrice'],
+                    'stop' => (float)($p['stopLoss'] ?? 0) > 0 ? (float)$p['stopLoss'] : null,
+                    'take' => (float)($p['takeProfit'] ?? 0) > 0 ? (float)$p['takeProfit'] : null,
+                    'mark' => (float)($p['markPrice'] ?? 0) ?: null, 'upnl' => isset($p['unrealisedPnl']) ? (float)$p['unrealisedPnl'] : null];
             }
         }
         return $out;
+    }
+
+    public function openOrders(): array
+    {
+        $r = $this->api->get('/v5/order/realtime', ['category' => 'linear', 'settleCoin' => 'USDT', 'limit' => 50], true);
+        $out = [];
+        foreach ($r['list'] ?? [] as $o) {
+            if (($o['orderType'] ?? '') !== 'Limit' || (float)($o['price'] ?? 0) <= 0) {
+                continue;                                    // условные/рыночные не показываем
+            }
+            $out[] = ['symbol' => $o['symbol'], 'side' => $o['side'], 'qty' => (float)$o['qty'], 'price' => (float)$o['price'],
+                'reduce' => (bool)($o['reduceOnly'] ?? false), 'link' => (string)($o['orderLinkId'] ?? '')];
+        }
+        return $out;
+    }
+
+    /** null — снять уровень (Bybit: значение "0"), число — поставить. */
+    public function setTradingStop(string $symbol, ?string $stop, ?string $take): void
+    {
+        $this->api->post('/v5/position/trading-stop', ['category' => 'linear', 'symbol' => $symbol, 'tpslMode' => 'Full', 'positionIdx' => 0,
+            'stopLoss' => $stop ?? '0', 'takeProfit' => $take ?? '0']);
     }
 
     public function setLeverage(string $symbol, int $leverage): void

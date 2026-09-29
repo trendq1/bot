@@ -76,6 +76,10 @@ final class AdminApi
             ['GET', '/me'] => ['username' => $a, 'role' => $admin['role'] ?? 'admin'],
             ['GET', '/overview'] => self::overview(max(7, min(365, (int)($_GET['days'] ?? 30)))),
             ['GET', '/signals'] => self::signals(),
+            ['GET', '/orders/overview'] => self::ordersOverview((int)($_GET['user_id'] ?? 0)),
+            ['GET', '/orders/command'] => self::commandResult((int)($_GET['id'] ?? 0)),
+            ['POST', '/orders/edit'] => self::ordersEdit($b, $a),
+            ['POST', '/orders/cancel'] => self::ordersCancel($b, $a),
             ['GET', '/analytics'] => self::analytics(max(1, min(365, (int)($_GET['days'] ?? 30)))),
             ['GET', '/users'] => self::users((string)($_GET['q'] ?? ''), (string)($_GET['filter'] ?? 'all')),
             ['GET', '/payments'] => self::payments(),
@@ -143,6 +147,8 @@ final class AdminApi
             || ($m === 'GET' && $path === '/manual/orders')
             || ($m === 'GET' && $path === '/manual/price')
             || ($m === 'GET' && $path === '/manual/positions')
+            || ($m === 'GET' && in_array($path, ['/orders/overview', '/orders/command'], true))
+            || ($m === 'POST' && in_array($path, ['/orders/edit', '/orders/cancel'], true))
             || ($m === 'POST' && $path === '/manual/order')
             || ($m === 'POST' && $path === '/manual/order/all')
             || ($m === 'POST' && $path === '/manual/close')
@@ -298,6 +304,129 @@ final class AdminApi
      * По всем клиентам и режимам (live+paper) за период — чтобы сразу было видно, живёт ли математика в плюсе,
      * а не «выглядит прибыльно по количеству зелёных сделок».
      */
+    private static function num(mixed $v): ?float
+    {
+        return $v === null || $v === '' ? null : (float)str_replace(',', '.', (string)$v);
+    }
+
+    /**
+     * Вкладка «Ордера и позиции»: сводка доходности, открытые позиции и ордера клиентов (из состояния воркеров,
+     * обновляется каждые ~10 секунд) и последние закрытые сделки. user_id = 0 — все клиенты.
+     */
+    private static function ordersOverview(int $uid): array
+    {
+        $where = $uid ? 'AND u.id = ' . $uid : '';
+        $rows = DB::all("SELECT u.id, u.username, u.first_name, b.running, b.trading_mode, b.risk_profile, a.mode AS ex_mode,
+                w.equity, w.day_pnl_pct, w.live, w.updated_at,
+                (SELECT equity FROM equity_snapshots s WHERE s.user_id = u.id ORDER BY s.id ASC LIMIT 1) AS first_equity
+            FROM users u JOIN bot_settings b ON b.user_id = u.id
+            LEFT JOIN exchange_accounts a ON a.user_id = u.id
+            LEFT JOIN worker_state w ON w.user_id = u.id
+            WHERE u.blocked = 0 $where ORDER BY u.id DESC");
+        $day = gmdate('Y-m-d 00:00:00');
+        $realized = [];
+        foreach (DB::all("SELECT user_id,
+                SUM(IF(closed_at >= ?, pnl, 0)) AS d1, SUM(IF(closed_at >= ?, pnl, 0)) AS d7, SUM(IF(closed_at >= ?, pnl, 0)) AS d30, SUM(pnl) AS total,
+                SUM(IF(closed_at >= ? AND pnl > 0, 1, 0)) AS w30, SUM(IF(closed_at >= ?, 1, 0)) AS n30
+            FROM trades GROUP BY user_id", [$day, gmdate('Y-m-d H:i:s', time() - 7 * 86400), gmdate('Y-m-d H:i:s', time() - 30 * 86400),
+                gmdate('Y-m-d H:i:s', time() - 30 * 86400), gmdate('Y-m-d H:i:s', time() - 30 * 86400)]) as $r) {
+            $realized[(int)$r['user_id']] = $r;
+        }
+        $clients = [];
+        $positions = [];
+        $orders = [];
+        $tot = ['equity' => 0.0, 'upnl' => 0.0, 'd1' => 0.0, 'd7' => 0.0, 'd30' => 0.0, 'w30' => 0, 'n30' => 0, 'positions' => 0, 'orders' => 0];
+        foreach ($rows as $r) {
+            $id = (int)$r['id'];
+            $name = $r['first_name'] ?: ($r['username'] ? '@' . $r['username'] : '#' . $id);
+            $fresh = $r['updated_at'] && strtotime($r['updated_at'] . ' UTC') >= time() - 120;
+            $live = $fresh ? (json_decode((string)$r['live'], true) ?: []) : [];
+            $upnl = 0.0;
+            foreach ($live['positions'] ?? [] as $p) {
+                $upnl += (float)$p['upnl'];
+                $positions[] = $p + ['user_id' => $id, 'client' => $name];
+            }
+            foreach ($live['orders'] ?? [] as $o) {
+                $orders[] = $o + ['user_id' => $id, 'client' => $name];
+            }
+            $eq = $r['equity'] !== null ? (float)$r['equity'] : null;
+            $re = $realized[$id] ?? ['d1' => 0, 'd7' => 0, 'd30' => 0, 'total' => 0, 'w30' => 0, 'n30' => 0];
+            $first = $r['first_equity'] !== null ? (float)$r['first_equity'] : null;
+            $clients[] = ['id' => $id, 'name' => $name, 'online' => $fresh, 'running' => (bool)$r['running'],
+                'account' => $r['trading_mode'] === 'exchange' ? ($r['ex_mode'] === 'live' ? 'реальный' : 'демо Bybit') : 'бумажный',
+                'equity' => $eq !== null ? round($eq, 2) : null, 'upnl' => round($upnl, 2),
+                'upnl_pct' => $eq ? round($upnl / $eq * 100, 2) : null, 'day_pct' => $r['day_pnl_pct'] !== null ? (float)$r['day_pnl_pct'] : null,
+                'realized_7d' => round((float)$re['d7'], 2), 'realized_30d' => round((float)$re['d30'], 2),
+                'realized_30d_pct' => $eq ? round((float)$re['d30'] / $eq * 100, 2) : null,
+                'roi_pct' => $eq && $first ? round(($eq - $first) / $first * 100, 2) : null,
+                'positions' => count($live['positions'] ?? []), 'orders' => count($live['orders'] ?? [])];
+            $tot['equity'] += (float)$eq;
+            $tot['upnl'] += $upnl;
+            $tot['d1'] += (float)$re['d1'];
+            $tot['d7'] += (float)$re['d7'];
+            $tot['d30'] += (float)$re['d30'];
+            $tot['w30'] += (int)$re['w30'];
+            $tot['n30'] += (int)$re['n30'];
+            $tot['positions'] += count($live['positions'] ?? []);
+            $tot['orders'] += count($live['orders'] ?? []);
+        }
+        $recent = DB::all("SELECT t.user_id, t.symbol, t.strategy, t.side, t.entry, t.`exit`, t.pnl, t.closed_at FROM trades t
+            " . ($uid ? 'WHERE t.user_id = ' . $uid : '') . ' ORDER BY t.id DESC LIMIT 25');
+        return [
+            'summary' => ['clients' => count($clients), 'equity' => round($tot['equity'], 2), 'upnl' => round($tot['upnl'], 2),
+                'upnl_pct' => $tot['equity'] ? round($tot['upnl'] / $tot['equity'] * 100, 2) : null,
+                'realized_today' => round($tot['d1'], 2), 'realized_7d' => round($tot['d7'], 2), 'realized_30d' => round($tot['d30'], 2),
+                'realized_30d_pct' => $tot['equity'] ? round($tot['d30'] / $tot['equity'] * 100, 2) : null,
+                'win_rate_30d' => $tot['n30'] ? round($tot['w30'] / $tot['n30'] * 100, 1) : null, 'trades_30d' => $tot['n30'],
+                'positions' => $tot['positions'], 'orders' => $tot['orders']],
+            'clients' => $clients, 'positions' => $positions, 'orders' => $orders,
+            'recent_trades' => array_map(fn($t) => ['user_id' => (int)$t['user_id'], 'symbol' => $t['symbol'], 'strategy' => $t['strategy'], 'side' => $t['side'],
+                'entry' => (float)$t['entry'], 'exit' => (float)$t['exit'], 'pnl' => round((float)$t['pnl'], 4), 'at' => Api::iso($t['closed_at'])], $recent),
+        ];
+    }
+
+    private static function commandResult(int $id): array
+    {
+        $c = DB::row('SELECT done_at, result FROM engine_commands WHERE id = ?', [$id]);
+        if (!$c) {
+            Api::fail(404, 'Команда не найдена');
+        }
+        return ['done' => $c['done_at'] !== null && $c['result'] !== null, 'result' => $c['result']];
+    }
+
+    /** Изменить SL/TP позиции клиента (пустое значение — снять уровень). Исполняет демон, результат — /orders/command. */
+    private static function ordersEdit(array $b, string $admin): array
+    {
+        $uid = (int)($b['user_id'] ?? 0);
+        $symbol = strtoupper(trim((string)($b['symbol'] ?? '')));
+        if (!$uid || !preg_match('/^[A-Z0-9]{2,15}USDT$/', $symbol)) {
+            Api::fail(400, 'Не указан клиент или монета');
+        }
+        $stop = self::num($b['stop_loss'] ?? null);
+        $take = self::num($b['take_profit'] ?? null);
+        if (($stop !== null && $stop <= 0) || ($take !== null && $take <= 0)) {
+            Api::fail(400, 'Цена должна быть больше нуля (или оставьте поле пустым, чтобы снять уровень)');
+        }
+        $id = DB::insert('engine_commands', ['cmd' => 'edit_stops', 'arg' => json_encode(['user_id' => $uid, 'symbol' => $symbol, 'stop' => $stop, 'take' => $take]),
+            'created_at' => DB::now()]);
+        self::audit($admin, 'orders.edit', "$uid $symbol SL=" . ($stop ?? '-') . ' TP=' . ($take ?? '-'));
+        return ['ok' => true, 'command_id' => $id];
+    }
+
+    private static function ordersCancel(array $b, string $admin): array
+    {
+        $uid = (int)($b['user_id'] ?? 0);
+        $symbol = strtoupper(trim((string)($b['symbol'] ?? '')));
+        $link = trim((string)($b['link'] ?? ''));
+        if (!$uid || $symbol === '' || $link === '') {
+            Api::fail(400, 'Не указан клиент, монета или ордер');
+        }
+        $id = DB::insert('engine_commands', ['cmd' => 'cancel_order', 'arg' => json_encode(['user_id' => $uid, 'symbol' => $symbol, 'link' => $link]),
+            'created_at' => DB::now()]);
+        self::audit($admin, 'orders.cancel', "$uid $symbol $link");
+        return ['ok' => true, 'command_id' => $id];
+    }
+
     /** Последние сигналы из Telegram с результатом по клиентам — для проверки канала перед реальными деньгами. */
     private static function signals(): array
     {
@@ -915,9 +1044,9 @@ final class AdminApi
         if (!$uid || $symbol === '') {
             Api::fail(400, 'Не указан клиент или монета');
         }
-        DB::insert('engine_commands', ['cmd' => 'manual_close', 'arg' => "$uid:$symbol", 'created_at' => DB::now()]);
+        $id = DB::insert('engine_commands', ['cmd' => 'manual_close', 'arg' => "$uid:$symbol", 'created_at' => DB::now()]);
         self::audit($admin, 'manual.close', "$uid $symbol");
-        return ['ok' => true];
+        return ['ok' => true, 'command_id' => $id];
     }
 
     /** Журнал ручных ордеров: по клиенту (?user_id=) или общий, для опроса статуса из формы. */
