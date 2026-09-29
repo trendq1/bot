@@ -256,7 +256,8 @@ final class MiniApi
         foreach ($state['symbols'] ?? [] as $sym => $s) {
             if (!empty($s['insight']) && !empty($s['features'])) {
                 $out[] = ['symbol' => $sym, 'price' => $s['price'] ?? $s['features']['price']] + $s['insight']
-                    + ['change_24h' => round((float)$s['features']['ret_24h'], 2), 'vision' => $vision[$sym] ?? null];
+                    + ['change_24h' => round((float)$s['features']['ret_24h'], 2), 'vision' => $vision[$sym] ?? null,
+                        'hard_regime' => $s['regime'] ?? 'no_trade'];
             }
         }
         return $out;

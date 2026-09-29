@@ -6,6 +6,8 @@ namespace App;
 final class Log
 {
     private const MAX = 5_000_000;
+    /** true — ничего не писать (бэктест: тысячи сделок по истории не должны попадать в боевой лог демона). */
+    public static bool $muted = false;
 
     public static function file(): string
     {
@@ -14,6 +16,9 @@ final class Log
 
     public static function write(string $level, string $msg): void
     {
+        if (self::$muted) {
+            return;
+        }
         $f = self::file();
         if (!is_dir(dirname($f))) {
             @mkdir(dirname($f), 0750, true);

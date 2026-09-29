@@ -23,8 +23,17 @@ final class Setups
         return ['strategy' => $strategy, 'side' => $side, 'entry' => $entry, 'stop' => $stop, 'take' => $take, 'risk' => abs($entry - $stop)];
     }
 
-    /** Вход по тренду после отката к EMA20 и подтверждающей свечи. */
-    public static function trend(array $f, string $regime, float $rr): ?array
+    /** Какую долю риска (R) съедает комиссия тейкера за вход и выход — главный фильтр «есть ли смысл в сделке». */
+    public static function feeR(float $entry, float $risk): float
+    {
+        return $risk > 0 ? 2 * ExchangeInterface::TAKER_FEE * $entry / $risk : INF;
+    }
+
+    /**
+     * Вход по тренду после отката к EMA20 и подтверждающей свечи. $f — признаки таймфрейма сигнала (в боте — 1h).
+     * $minStopAtr — стоп не ближе стольких ATR: на 5м стоп в 0.5 ATR был ~0.1% цены при комиссии 0.11% за круг.
+     */
+    public static function trend(array $f, string $regime, float $rr, float $minStopAtr = 0.5): ?array
     {
         $atr = $f['atr'];
         $price = $f['price'];
@@ -32,7 +41,7 @@ final class Setups
             $pulled = $f['low_5'] <= $f['ema20_1'] + 0.2 * $atr;
             $confirm = $f['c1'] > $f['o1'] && $f['c1'] > $f['ema20_1'] && $f['c1'] > $f['h2'];
             if ($pulled && $confirm && $f['rsi'] >= 45 && $f['rsi'] <= 72 && $price - $f['ema20'] < 1.5 * $atr) {
-                $stop = self::boundedStop($price, $f['low_10'] - 0.3 * $atr, $atr, 1, 0.5, 3.0);
+                $stop = self::boundedStop($price, $f['low_10'] - 0.3 * $atr, $atr, 1, $minStopAtr, 3.0);
                 if ($stop !== null) {
                     return self::setup('trend', 'Buy', $price, $stop, $price + $rr * ($price - $stop));
                 }
@@ -42,7 +51,7 @@ final class Setups
             $pulled = $f['high_5'] >= $f['ema20_1'] - 0.2 * $atr;
             $confirm = $f['c1'] < $f['o1'] && $f['c1'] < $f['ema20_1'] && $f['c1'] < $f['l2'];
             if ($pulled && $confirm && $f['rsi'] >= 28 && $f['rsi'] <= 55 && $f['ema20'] - $price < 1.5 * $atr) {
-                $stop = self::boundedStop($price, $f['high_10'] + 0.3 * $atr, $atr, -1, 0.5, 3.0);
+                $stop = self::boundedStop($price, $f['high_10'] + 0.3 * $atr, $atr, -1, $minStopAtr, 3.0);
                 if ($stop !== null) {
                     return self::setup('trend', 'Sell', $price, $stop, $price - $rr * ($stop - $price));
                 }

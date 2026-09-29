@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Engine;
 
-/** Дневной лимит убытка и пауза после серии убыточных сделок. */
+/** Дневной лимит убытка, пауза после серии убыточных сделок, Adaptive Risk. Состояние переживает рестарт (export/import). */
 final class RiskGuard
 {
     public ?string $day = null;
@@ -17,9 +17,9 @@ final class RiskGuard
 
     public function __construct(private array $prof) {}
 
-    public function updateEquity(float $equity): void
+    public function updateEquity(float $equity, ?float $now = null): void
     {
-        $today = gmdate('Y-m-d');
+        $today = gmdate('Y-m-d', (int)($now ?? time()));
         if ($today !== $this->day) {
             $this->day = $today;
             $this->dayStartEquity = $equity;
@@ -75,6 +75,23 @@ final class RiskGuard
         }
         $dd = max(0.0, ($this->peakEquity - $equity) / $this->peakEquity);
         return max(0.4, 1 - $dd * 2);
+    }
+
+    /** Состояние для сохранения в БД: без него рестарт демона обнулял дневной лимит, паузу и пик equity. */
+    public function export(): array
+    {
+        return ['day' => $this->day, 'day_start_equity' => $this->dayStartEquity, 'consec_losses' => $this->consecLosses,
+            'paused_until' => $this->pausedUntil, 'day_directional_trades' => $this->dayDirectionalTrades, 'peak_equity' => $this->peakEquity];
+    }
+
+    public function import(array $s): void
+    {
+        $this->day = isset($s['day']) ? (string)$s['day'] : null;
+        $this->dayStartEquity = (float)($s['day_start_equity'] ?? 0);
+        $this->consecLosses = (int)($s['consec_losses'] ?? 0);
+        $this->pausedUntil = (float)($s['paused_until'] ?? 0);
+        $this->dayDirectionalTrades = (int)($s['day_directional_trades'] ?? 0);
+        $this->peakEquity = (float)($s['peak_equity'] ?? 0);
     }
 
     /** Возвращает true, если включилась пауза. */

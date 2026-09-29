@@ -5,7 +5,9 @@ namespace App\Engine;
 
 /**
  * Бумажная биржа: виртуальный счёт на реальных ценах, с комиссиями Bybit.
- * Лимитные ордера исполняются, когда цена их пересекает; стоп/тейк позиции проверяются на каждой цене.
+ * Намеренно не оптимистичная: лимитный ордер исполняется, только если цена прошла СКВОЗЬ него (касание уровня —
+ * не гарантия исполнения, в очереди перед нами другие ордера); стоп исполняется по худшей из цены стопа и текущей
+ * цены (гэп мимо стопа), а рыночные исполнения — с проскальзыванием SLIPPAGE.
  */
 final class PaperExchange implements ExchangeInterface
 {
@@ -16,8 +18,17 @@ final class PaperExchange implements ExchangeInterface
     /** symbol => [size (+лонг/-шорт), entry, stop, take] */
     public array $pos = [];
     public array $closed = [];
+    /** Проскальзывание рыночных и стоп-исполнений (доля цены). */
+    public const SLIPPAGE = 0.0002;
+    /** Время текущего такта (в бэктесте — время свечи); null — реальное время. */
+    public ?float $now = null;
 
     public function __construct(public float $balance) {}
+
+    private function slip(string $side, float $price): float
+    {
+        return $side === 'Buy' ? $price * (1 + self::SLIPPAGE) : $price * (1 - self::SLIPPAGE);
+    }
 
     public function mode(): string { return 'paper'; }
 
@@ -26,7 +37,7 @@ final class PaperExchange implements ExchangeInterface
         foreach ($prices as $symbol => $price) {
             $this->prices[$symbol] = $price;
             foreach ($this->orders[$symbol] ?? [] as $id => $o) {
-                if ($o['side'] === 'Buy' ? $price <= $o['price'] : $price >= $o['price']) {
+                if ($o['side'] === 'Buy' ? $price < $o['price'] : $price > $o['price']) {
                     $this->fill($symbol, $id);
                 }
             }
@@ -34,7 +45,8 @@ final class PaperExchange implements ExchangeInterface
             if ($p && $p['size'] != 0) {
                 $long = $p['size'] > 0;
                 if ($p['stop'] !== null && ($long ? $price <= $p['stop'] : $price >= $p['stop'])) {
-                    $this->trade($symbol, $long ? 'Sell' : 'Buy', abs($p['size']), $p['stop'], self::TAKER_FEE);
+                    $fill = $long ? min($price, $p['stop']) : max($price, $p['stop']);
+                    $this->trade($symbol, $long ? 'Sell' : 'Buy', abs($p['size']), $this->slip($long ? 'Sell' : 'Buy', $fill), self::TAKER_FEE);
                 } elseif ($p['take'] !== null && ($long ? $price >= $p['take'] : $price <= $p['take'])) {
                     $this->trade($symbol, $long ? 'Sell' : 'Buy', abs($p['size']), $p['take'], self::TAKER_FEE);
                 }
@@ -84,7 +96,7 @@ final class PaperExchange implements ExchangeInterface
         $pnl = $closing * ($price - $p['entry']) * ($p['size'] > 0 ? 1 : -1);
         $this->balance += $pnl;
         $this->closed[$symbol][] = ['pnl' => $pnl - $closing * ($price + $p['entry']) * $fee, 'exit' => $price,
-            'ts' => (int)(microtime(true) * 1000)];
+            'ts' => (int)(($this->now ?? microtime(true)) * 1000)];
         $rest = $qty - $closing;
         $p['size'] = $rest == 0 ? $p['size'] + $signed : 0.0;
         if (abs($p['size']) < 1e-12) {
@@ -135,7 +147,7 @@ final class PaperExchange implements ExchangeInterface
         if ($reduceOnly) {
             $q = min($q, abs($this->pos[$symbol]['size'] ?? 0));
         }
-        $this->trade($symbol, $side, $q, $this->prices[$symbol], self::TAKER_FEE);
+        $this->trade($symbol, $side, $q, $this->slip($side, $this->prices[$symbol]), self::TAKER_FEE);
         if ($stop !== null) {
             $this->pos[$symbol]['stop'] = (float)$stop;
         }
@@ -187,9 +199,10 @@ final class PaperExchange implements ExchangeInterface
         if (!$p || $p['size'] == 0) {
             return null;
         }
-        $price = $this->prices[$symbol];
+        $side = $p['size'] > 0 ? 'Sell' : 'Buy';
+        $price = $this->slip($side, $this->prices[$symbol]);
         $qty = abs($p['size']);
-        $this->trade($symbol, $p['size'] > 0 ? 'Sell' : 'Buy', $qty, $price, self::TAKER_FEE);
+        $this->trade($symbol, $side, $qty, $price, self::TAKER_FEE);
         return [$price, $qty];
     }
 }

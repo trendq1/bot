@@ -51,7 +51,7 @@ while (true) {
                 }
                 $lastRun[$sym] = time();
                 $tuning = json_decode((string)DB::val('SELECT params FROM symbol_tuning WHERE symbol = ?', [$sym]), true) ?: [];
-                $ins = $ai->analyze($sym, $s['features'], $learner->statsFor($sym), $lessons, $tuning,
+                $ins = $ai->analyze($sym, $s['features'] + ['hard_regime' => $s['regime'] ?? null], $learner->statsFor($sym), $lessons, $tuning,
                     ['longs_liquidated' => $s['liq_long_1h'] ?? 0, 'shorts_liquidated' => $s['liq_short_1h'] ?? 0], $s['funding'] ?? null);
                 if ($ins['source'] === 'ai') {
                     DB::insert('ai_insights', ['symbol' => $sym, 'ts' => DB::now(), 'source' => 'ai', 'regime' => $ins['regime'], 'payload' => $ins]);

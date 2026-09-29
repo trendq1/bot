@@ -7,13 +7,29 @@ use App\Log;
 
 /**
  * Торговый процесс одного клиента. На каждом такте:
- * 1) депозит и дневной лимит убытка; 2) выбор стратегии по монете: вес ИИ × множитель обучения × настройки клиента;
- * 3) ведение сеток, открытие направленных сделок, фиксация закрытых сделок.
+ * 1) депозит, дневной лимит, аварийная остановка; 2) жёсткий режим рынка (Regime) решает, какие стратегии вообще
+ * допустимы — иначе NO_TRADE; 3) среди допустимых — вес ИИ × множитель обучения × настройки клиента;
+ * 4) риск портфеля/корреляции/экспозиции и комиссия относительно стопа; 5) вход, размер от риска до стопа;
+ * 6) выход по стопу/тейку/трейлингу, слому структуры, развороту режима, времени; 7) статистика по результату.
  * На одной монете одновременно работает одна стратегия (one-way режим позиций).
  */
 final class Worker
 {
+    /** Максимальное удержание сделки на отскок после ликвидаций (5м-стратегия). */
     public const MAX_HOLD_SEC = 3 * 3600;
+    /** Трендовая сделка на 1h живёт дольше, но не бесконечно: нет движения за двое суток — edge исчез. */
+    public const TREND_MAX_HOLD_SEC = 48 * 3600;
+    /** Комиссия тейкера за вход+выход не должна съедать больше этой доли R — иначе сделка не имеет смысла. */
+    public const MAX_FEE_R = 0.15;
+    /** Стоп трендовой сделки не ближе стольких ATR(1h). */
+    public const TREND_MIN_STOP_ATR = 1.0;
+    public const TREND_MIN_RR = 1.5;
+    /** Пауза стратегии после просадки больше max_strategy_dd_pct профиля. */
+    public const STRATEGY_PAUSE_SEC = 24 * 3600;
+    /** Сколько тактов подряд позиции сетки нет на бирже, прежде чем считать, что её закрыл стоп-лосс биржи. */
+    public const GRID_FLAT_TICKS = 3;
+    /** Боковик закончился (режим не RANGE) дольше этого — у сетки больше нет причины держать убыточный инвентарь. */
+    public const GRID_REGIME_EXIT_SEC = 30 * 60;
     public const LIQ_COOLDOWN_SEC = 20 * 60;
     /** После стопа сетки на монете не открываем новую сразу — даём рынку успокоиться. */
     public const GRID_STOP_COOLDOWN_SEC = 30 * 60;
@@ -26,9 +42,9 @@ final class Worker
         ['XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'LTCUSDT'],
     ];
     /** С какой прибыли (в R) переносим стоп в безубыток / начинаем трейлить, и на каком расстоянии (тоже в R). */
-    private const TRAIL_BREAKEVEN_R = 0.8;
+    private const TRAIL_BREAKEVEN_R = 1.0;
     private const TRAIL_START_R = 1.5;
-    private const TRAIL_DISTANCE_R = 0.6;
+    private const TRAIL_DISTANCE_R = 1.0;
     private const PARTIAL_TAKE_R = 1.0;
     /** Сколько ждём, пока закрытие позиции появится в /v5/position/closed-pnl (у Bybit бывает задержка в секунды). */
     private const CLOSED_PNL_WAIT_MS = 60_000;
@@ -53,8 +69,23 @@ final class Worker
     public array $pendingStopReason = [];
     /** symbol => время направленной сделки с результатом хуже BIG_LOSS_R_THRESHOLD — пауза перед новой ставкой. */
     public array $lastBigLoss = [];
+    /** strategy => ['cum' => реализованный PnL, 'peak' => пик] — для лимита просадки стратегии. */
+    public array $strategyPnl = [];
+    /** strategy => до какого времени стратегия на паузе после просадки. */
+    public array $strategyPausedUntil = [];
+    /** symbol => сколько тактов подряд у активной сетки с инвентарём нет позиции на бирже. */
+    public array $gridFlatTicks = [];
+    /** symbol => с какого момента режим рынка перестал быть RANGE для открытой сетки. */
+    public array $gridRegimeOffSince = [];
+    /** Аварийная остановка (kill switch из админки): всё закрыть и не открывать новых сделок. */
+    public bool $halted = false;
+    /** Выключатели стратегий на уровне платформы (админка) — поверх настроек клиента: strategy => bool. */
+    public array $platformEnabled = [];
+    private bool $haltDone = false;
     public float $equity = 0.0;
     public string $status = 'запуск';
+    /** Время текущего такта (в демоне — реальное, в бэктесте — время свечи). */
+    private float $now = 0.0;
     private float $equityTs = 0.0;
     private float $snapTs = 0.0;
     private array $leverageSet = [];
@@ -87,16 +118,29 @@ final class Worker
         $this->budgetMult = max(self::BUDGET_MULT_MIN, min(self::BUDGET_MULT_MAX, $this->budgetMult ?: 1.0));
     }
 
+    private function now(): float
+    {
+        return $this->now ?: microtime(true);
+    }
+
     public function step(float $now): void
     {
+        $this->now = $now;
         if ($this->ex instanceof PaperExchange) {
+            $this->ex->now = $now;
             $this->ex->updatePrices($this->market->prices());
         }
         if ($now - $this->equityTs > 30 || !$this->equity) {
             $this->equity = $this->ex->equity();
-            $this->guard->updateEquity($this->equity);
+            $this->guard->updateEquity($this->equity, $now);
             $this->equityTs = $now;
         }
+        if ($this->halted) {
+            $this->emergencyFlatten();
+            $this->status = '⛔ аварийная остановка: позиции закрыты, новых сделок нет';
+            return;
+        }
+        $this->haltDone = false;
         if ($now - $this->snapTs > 900) {
             ($this->snapshot)($this->userId, $this->equity);
             $this->snapTs = $now;
@@ -115,9 +159,9 @@ final class Worker
         $this->status = $allowed ? "$mode · сетки: " . ($grids ?: 'нет') . ' · сделки: ' . count($this->directional) : "⏸ $reason";
     }
 
-    public function weights(string $sym, array $ins): array
+    public function weights(string $sym, array $ins, ?string $regime = null): array
     {
-        $m = fn($s) => $this->brain->learner->mult($sym, $s, $ins['regime']);
+        $m = fn($s) => $this->brain->learner->mult($sym, $s, $regime ?? $ins['regime']);
         return [
             'grid' => ($this->enabled['grid'] ?? true) ? $ins['w_grid'] * $m('grid') : 0.0,
             'trend' => ($this->enabled['trend'] ?? true) ? $ins['w_trend'] * $m('trend') : 0.0,
@@ -169,123 +213,143 @@ final class Worker
         if (!$feed->price || !$inst || !$f || !$ins) {
             return;
         }
+        $regime = $this->brain->regimes[$sym] ?? Regime::NO_TRADE;
+        $h1 = $this->brain->featuresH1[$sym] ?? null;
         if (!isset($this->leverageSet[$sym])) {
             $this->ex->setLeverage($sym, (int)min($this->prof['leverage'], $inst->maxLeverage));
             $this->leverageSet[$sym] = true;
         }
-        if ($this->checkReversal($sym, $ins, $positions)) {
-            return;                                          // позицию только что закрыли по развороту — на этом такте всё
+        if ($this->checkExit($sym, $ins, $regime, $h1, $positions)) {
+            return;                                          // позицию только что закрыли — на этом такте всё
         }
         $this->applyPartialTake($sym, $feed->price);
         $this->applyTrailing($sym, $feed->price);
-        $w = $this->weights($sym, $ins);
+        $w = $this->weights($sym, $ins, $regime);
         $tuning = $this->brain->tuning[$sym] ?? [];
 
         if (isset($this->grids[$sym])) {
-            $grid = $this->grids[$sym];
-            foreach ($grid->sync($feed->price) as $ev) {
-                $this->onGridEvent($sym, $grid, $ev, $ins['regime'], $now);
-            }
-            $want = $allowed && $ins['grid_mode'] === $grid->plan['mode'] && $w['grid'] >= 0.4;
-            if ($grid->active && !$grid->draining && !$want) {
-                // Настоящий разворот (не просто просевший вес) и уже плавающий убыток — закрываем сразу,
-                // не дожидаясь полного стопа сетки: то же самое, что checkReversal() делает для направленных сделок.
-                $reversed = in_array($ins['grid_mode'], ['long', 'short'], true) && $ins['grid_mode'] !== $grid->plan['mode'];
-                if ($reversed && $grid->floatingPnl($feed->price) < 0) {
-                    $this->pendingStopReason[$sym] = 'reversal';
-                    $ev = $grid->stop($feed->price);
-                    if ($ev) {
-                        unset($this->pendingStopReason[$sym]);
-                        $this->onGridEvent($sym, $grid, $ev, $ins['regime'], $now, 'reversal');
-                    }
-                } else {
-                    $grid->drain();
-                }
-            } elseif ($grid->active && $grid->idleFar($feed->price)) {
-                $grid->stop($feed->price);
-            }
-            if (!$grid->active && $grid->pendingStop === null) {
-                unset($this->grids[$sym]);                   // пока не заберём реальный PnL стопа (см. checkGridStops) — не освобождаем монету
-            }
+            $this->manageGrid($sym, $this->grids[$sym], $positions, $allowed, $regime, $w, $now);
             return;
         }
         if ($this->manualMode || !$allowed || isset($this->directional[$sym]) || isset($positions[$sym]) || isset($this->pendingManual[$sym])) {
             return;                                          // в ручном режиме автостратегии новых сделок не открывают
         }
-        arsort($w);
-        $best = array_key_first($w);
-        // Grid Safety: жёсткий блок на код-уровне — экстремальный выброс ATR или явный пробой (объём+наклон EMA+ATR)
-        // запрещают новую сетку независимо от того, что скажут веса ИИ/алгоритма. AI это обойти не может.
-        if ($best === 'grid' && $w['grid'] >= 0.5 && $ins['grid_mode'] !== 'off' && count($this->grids) < $this->prof['max_grids']
+        // NO_TRADE по умолчанию: стратегия может открыться только если режим рынка это прямо разрешает (Regime::allows)
+        // — это жёсткая проверка кода, ИИ её не видит и обойти не может. Остальное (вес, статистика) — только среди допустимых.
+        if ($h1 && $this->strategyAllowed('grid', $regime, $now) && $w['grid'] >= 0.4
+            && count($this->grids) < $this->prof['max_grids']
             && (!isset($this->lastGridStop[$sym]) || $now - $this->lastGridStop[$sym] > self::GRID_STOP_COOLDOWN_SEC)
-            && !$this->correlatedGridOpen($sym) && !Indicators::isExtremeVolatility($f) && !Indicators::isBreakout($f)) {
-            $this->startGrid($sym, $f, $ins, $tuning);
-            return;
-        }
-        if (count($this->directional) >= $this->prof['max_directional']) {
-            return;
-        }
-        if ($this->guard->directionalTradesLeft() <= 0) {
-            return;                                          // дневной лимит числа направленных сделок исчерпан
-        }
-        if ($this->correlatedDirectionalOpen($sym)) {
-            return;                                          // по коррелирующей монете уже есть направленная ставка
-        }
-        if ($now - ($this->lastBigLoss[$sym] ?? 0) < self::BIG_LOSS_COOLDOWN_SEC) {
-            return;                                          // недавно был крупный убыток на этой монете — пауза
-        }
-        if ($this->quietHours($now) || $this->quietMarket($f)) {
-            return;                                          // тихие часы или мёртвая волатильность — новых ставок не берём
-        }
-        $setup = null;
-        if ($w['trend'] >= 0.5 && ($this->lastTrendBar[$sym] ?? null) !== $f['last_closed_ts']) {
-            $this->lastTrendBar[$sym] = $f['last_closed_ts'];
-            $setup = Setups::trend(['price' => $feed->price] + $f, $ins['regime'], (float)($tuning['trend_rr'] ?? $this->prof['rr']));
-            // Подтверждение старшим таймфреймом (15м): нет истории или там нет чёткого направления — не блокируем,
-            // но если 15м явно смотрит в другую сторону — пропускаем сигнал 5м, чтобы не ловить локальный шум.
-            if ($setup !== null) {
-                $htf = Indicators::htfTrend($feed->klines);
-                $wantUp = $setup['side'] === 'Buy';
-                if ($htf !== null && (($wantUp && $htf === 'down') || (!$wantUp && $htf === 'up'))) {
-                    $setup = null;
-                }
+            && !$this->correlatedGridOpen($sym)) {
+            $side = Regime::rangeGridSide(['price' => $feed->price] + $h1);
+            if ($side !== null) {
+                $this->startGrid($sym, $f, $ins, $tuning, $side);
+                return;
             }
         }
-        if ($setup === null && $w['liquidation'] >= 0.4 && $now - ($this->lastLiq[$sym] ?? 0) > self::LIQ_COOLDOWN_SEC) {
+        if (count($this->directional) >= $this->prof['max_directional'] || $this->guard->directionalTradesLeft() <= 0
+            || $this->correlatedDirectionalOpen($sym) || $now - ($this->lastBigLoss[$sym] ?? 0) < self::BIG_LOSS_COOLDOWN_SEC) {
+            return;
+        }
+        $setup = null;
+        if ($h1 && $this->strategyAllowed('trend', $regime, $now) && $w['trend'] >= 0.4
+            && ($this->lastTrendBar[$sym] ?? null) !== $h1['last_closed_ts']) {
+            $this->lastTrendBar[$sym] = $h1['last_closed_ts'];
+            $rr = max(self::TREND_MIN_RR, (float)($tuning['trend_rr'] ?? $this->prof['rr']));
+            $setup = Setups::trend(['price' => $feed->price] + $h1, $regime === Regime::STRONG_UP ? 'trend_up' : 'trend_down',
+                $rr, self::TREND_MIN_STOP_ATR);
+        }
+        if ($setup === null && $this->strategyAllowed('liquidation', $regime, $now) && $w['liquidation'] >= 0.4
+            && !$this->quietHours($now) && !$this->quietMarket($f) && $now - ($this->lastLiq[$sym] ?? 0) > self::LIQ_COOLDOWN_SEC) {
             $setup = Setups::liquidation($feed, $f, (float)($tuning['liq_threshold_mult'] ?? AIAnalyst::TUNABLE['liq_threshold_mult'][2]), $now);
             if ($setup) {
                 $this->lastLiq[$sym] = $now;
             }
         }
         if ($setup) {
-            $this->openDirectional($sym, $setup, $ins, $w[$setup['strategy']]);
+            $this->openDirectional($sym, $setup, $ins, $w[$setup['strategy']], $regime);
         }
     }
 
-    private function startGrid(string $sym, array $f, array $ins, array $tuning): void
+    /** Стратегия включена клиентом, разрешена режимом рынка и не на паузе после собственной просадки. */
+    private function strategyAllowed(string $strategy, string $regime, float $now): bool
+    {
+        return ($this->enabled[$strategy] ?? true) && ($this->platformEnabled[$strategy] ?? true) && Regime::allows($regime, $strategy)
+            && $now >= ($this->strategyPausedUntil[$strategy] ?? 0);
+    }
+
+    private function manageGrid(string $sym, Grid $grid, array $positions, bool $allowed, string $regime, array $w, float $now): void
+    {
+        $price = $this->market->feeds[$sym]->price;
+        // Стоп-лосс сетки теперь стоит на бирже: если позиции нет несколько тактов подряд, а инвентарь есть —
+        // её закрыл стоп биржи (или трейдер вручную). Забираем реальный результат из closed-pnl.
+        if ($grid->active && $grid->inventory && !isset($positions[$sym])) {
+            $this->gridFlatTicks[$sym] = ($this->gridFlatTicks[$sym] ?? 0) + 1;
+            if ($this->gridFlatTicks[$sym] >= self::GRID_FLAT_TICKS) {
+                unset($this->gridFlatTicks[$sym]);
+                $grid->stop($price, $now, true);
+                return;
+            }
+        } else {
+            unset($this->gridFlatTicks[$sym]);
+        }
+        foreach ($grid->sync($price, $now) as $ev) {
+            $this->onGridEvent($sym, $grid, $ev, $regime, $now);
+        }
+        $inRange = Regime::allows($regime, 'grid');
+        if ($inRange) {
+            unset($this->gridRegimeOffSince[$sym]);
+        } else {
+            $this->gridRegimeOffSince[$sym] ??= $now;
+        }
+        $want = $allowed && $inRange && $w['grid'] >= 0.4;
+        if ($grid->active && !$want) {
+            // Сетка зарабатывает только в боковике. Режим ушёл против неё (сильный тренд против, пробой, выброс
+            // волатильности) — в минусе закрываем сразу. Боковик просто закончился и не вернулся за 30 минут —
+            // в минусе тоже закрываем: держать убыточный инвентарь «пока сигнал формально не отменён» — это ровно
+            // тот путь к крупному стопу, из-за которого десятки мелких плюсов обнулялись. В плюсе — мягко доводим.
+            $long = $grid->plan['mode'] === 'long';
+            $against = in_array($regime, [Regime::BREAKOUT, Regime::HIGH_VOL, $long ? Regime::STRONG_DOWN : Regime::STRONG_UP], true);
+            $rangeGone = !$inRange && $now - $this->gridRegimeOffSince[$sym] >= self::GRID_REGIME_EXIT_SEC;
+            if (($against || $rangeGone) && $grid->floatingPnl($price) < 0) {
+                $reason = $against ? 'reversal' : 'regime_exit';
+                $this->pendingStopReason[$sym] = $reason;
+                $ev = $grid->stop($price, $now);
+                if ($ev) {
+                    unset($this->pendingStopReason[$sym]);
+                    $this->onGridEvent($sym, $grid, $ev, $regime, $now, $reason);
+                }
+            } elseif (!$grid->draining) {
+                $grid->drain();
+            }
+        } elseif ($grid->active && $grid->idleFar($price)) {
+            $grid->stop($price, $now);
+        }
+        if (!$grid->active && $grid->pendingStop === null) {
+            unset($this->grids[$sym], $this->gridRegimeOffSince[$sym]);   // пока не заберём реальный PnL стопа (см. checkGridStops) — не освобождаем монету
+        }
+    }
+
+    private function startGrid(string $sym, array $f, array $ins, array $tuning, string $side): void
     {
         $inst = $this->market->instruments[$sym];
         $price = $this->market->feeds[$sym]->price;
-        // Adaptive Risk: множитель ИИ дополнительно уменьшается, если есть просадка от пика equity.
-        // budgetMult — клиентский выбор (0.5–1.5), масштабирует и капитал, и риск-бюджет сделки пропорционально,
-        // не меняя соотношение убыток/прибыль сетки (Grid Risk Protection всё равно ограничит суммарный риск).
-        $riskMult = $ins['risk_mult'] * $this->guard->adaptiveMult($this->equity) * $this->budgetMult;
+        // Adaptive Risk и клиентский бюджет только уменьшают/масштабируют риск, риск ИИ (risk_mult ≤ 1.2) — тоже в рамках.
+        $riskMult = min(1.0, $ins['risk_mult']) * $this->guard->adaptiveMult($this->equity) * $this->budgetMult;
         $capital = $this->equity * $this->prof['grid_alloc'] / $this->prof['max_grids'] * $riskMult;
         $maxLoss = $this->equity * $this->prof['grid_max_loss_pct'] / 100 * $riskMult;
-        // Grid Risk Protection: суммарный риск (max_loss) всех уже открытых сеток + новая не должны превышать
-        // общий лимит по профилю — иначе несколько сеток вместе могут поставить под удар больше, чем задумано.
+        // Grid Risk Protection: суммарный max_loss всех сеток клиента не выше лимита профиля.
         $usedRisk = array_sum(array_map(fn(Grid $g) => (float)$g->plan['max_loss'], $this->grids));
         $riskCap = $this->equity * (float)($this->prof['max_total_grid_risk_pct'] ?? 100) / 100;
         if ($usedRisk + $maxLoss > $riskCap) {
             return;
         }
-        $plan = Grid::plan($price, $f['atr'], $inst, $ins['grid_mode'], (float)($tuning['grid_step_atr'] ?? $ins['grid_step_atr']),
+        $plan = Grid::plan($price, $f['atr'], $inst, $side, (float)($tuning['grid_step_atr'] ?? $ins['grid_step_atr']),
             $this->prof['grid_levels'], $capital, (int)min($this->prof['leverage'], $inst->maxLeverage), $maxLoss);
-        if ($plan === null) {
+        if ($plan === null || !$this->canAddRisk($sym, (float)$plan['max_loss'], (float)$plan['qty'] * $plan['levels'] * $price)) {
             return;
         }
         $grid = new Grid($this->ex, $sym, $inst, $plan);
-        $grid->start();
+        $grid->start($this->now());
         $this->grids[$sym] = $grid;
         Log::info(sprintf('user %d: сетка %s %s шаг %.2f%% x%d, объём уровня %s', $this->userId, $sym, $plan['mode'],
             $plan['step_pct'], $plan['levels'], $plan['qty']));
@@ -299,39 +363,79 @@ final class Worker
             $this->lastGridStop[$sym] = $now;                 // пауза перед новой сеткой на этой монете — см. GRID_STOP_COOLDOWN_SEC
             // funding применяется только к финальному стопу (не к каждому мелкому циклу — те держатся слишком
             // коротко, чтобы funding был заметен): оценка по времени с момента запуска этой сетки.
-            $pnl -= $this->fundingEstimate($sym, $ev['side'], $ev['qty'] * $ev['entry'], microtime(true) - $grid->startedAt);
+            $pnl -= $this->fundingEstimate($sym, $ev['side'], $ev['qty'] * $ev['entry'], $now - $grid->startedAt);
         }
+        $grid->lastEventMs = (int)($now * 1000);
         $this->recordTrade($sym, 'grid', $ev['side'], $ev['qty'], $ev['entry'], $ev['exit'], $pnl,
             $pnl / $grid->unitRisk(), $regime, $grid->tag, $kindOverride ?? $ev['kind']);
     }
 
     /**
-     * Досрочный выход из направленной сделки (тренд/ликвидации), если рынок развернулся против позиции —
-     * не ждём полного стопа или тейка. Не трогает ручные сделки трейдера и сетки (у них своя логика выхода).
+     * Выход из автоматической направленной сделки раньше стопа/тейка, если исчезла причина её держать.
+     * Ручные сделки трейдера и сетки не трогает. Для тренда (1h):
+     *  - слом структуры: закрытая часовая свеча по другую сторону EMA50 — выход;
+     *  - режим развернулся против позиции / выброс волатильности: в минусе — выход, в плюсе — стоп в безубыток
+     *    (не отдаём прибыль, но и не режем прибыльную сделку по шуму).
+     * Для отскока после ликвидаций (5м) — прежняя логика по режиму ИИ.
      * @return bool true — позицию закрыли (или попытались), дальше на этом такте по монете делать нечего.
      */
-    private function checkReversal(string $sym, array $ins, array $positions): bool
+    private function checkExit(string $sym, array $ins, string $regime, ?array $h1, array $positions): bool
     {
         $d = $this->directional[$sym] ?? null;
-        if (!$d || $d['strategy'] === 'manual' || !isset($positions[$sym])) {
+        if (!$d || $d['strategy'] === 'manual' || !isset($positions[$sym]) || isset($d['gone_ms'])) {
             return false;
         }
-        $nowMs = (int)(microtime(true) * 1000);
+        $nowMs = (int)($this->now() * 1000);
         if ($nowMs - $d['opened_ms'] < 60_000) {
             return false;                                     // не дёргаемся в первую минуту после входа
         }
         $long = $d['side'] === 'Buy';
-        $reversed = $long ? $ins['regime'] === 'trend_down' : $ins['regime'] === 'trend_up';
-        if (!$reversed) {
+        $price = $this->market->feeds[$sym]->price;
+        $inProfit = $price && ($long ? $price > $d['entry'] : $price < $d['entry']);
+        $reason = null;
+        if ($d['strategy'] === 'trend') {
+            $against = in_array($regime, [$long ? Regime::STRONG_DOWN : Regime::STRONG_UP, Regime::HIGH_VOL], true);
+            if ($h1 && ($long ? $h1['c1'] < $h1['ema50_1'] : $h1['c1'] > $h1['ema50_1'])) {
+                $reason = 'слом структуры (часовая свеча закрылась за EMA50)';
+            } elseif ($against && !$inProfit) {
+                $reason = "режим рынка развернулся против позиции ($regime)";
+            } elseif ($against && $inProfit) {
+                $this->moveStopToBreakeven($sym);
+            }
+        } elseif ($long ? $ins['regime'] === 'trend_down' : $ins['regime'] === 'trend_up') {
+            $reason = "разворот тренда против позиции ({$ins['regime']})";
+        }
+        if ($reason === null) {
             return false;
         }
         try {
             $this->ex->closePosition($sym);                 // закрытие увидит checkDirectional на следующем такте и запишет сделку
-            Log::info("user {$this->userId}: $sym закрыт досрочно — разворот тренда против позиции ({$ins['regime']})");
+            Log::info("user {$this->userId}: $sym закрыт досрочно — $reason");
         } catch (\Throwable $e) {
-            Log::error("user {$this->userId}: не удалось закрыть $sym при развороте: " . $e->getMessage());
+            Log::error("user {$this->userId}: не удалось закрыть $sym досрочно: " . $e->getMessage());
         }
         return true;
+    }
+
+    private function moveStopToBreakeven(string $sym): void
+    {
+        $d = $this->directional[$sym];
+        $inst = $this->market->instruments[$sym] ?? null;
+        if (!$inst || ($d['trail_be'] ?? false)) {
+            return;
+        }
+        $long = $d['side'] === 'Buy';
+        $be = (float)$inst->roundPrice($long ? $d['entry'] * (1 + 2 * ExchangeInterface::TAKER_FEE) : $d['entry'] * (1 - 2 * ExchangeInterface::TAKER_FEE), !$long);
+        if ($long ? $be <= $d['stop'] : $be >= $d['stop']) {
+            return;
+        }
+        try {
+            $this->ex->setStopLoss($sym, (string)$be);
+            $this->directional[$sym]['stop'] = $be;
+            $this->directional[$sym]['trail_be'] = true;
+        } catch (\Throwable $e) {
+            Log::error("user {$this->userId}: не удалось перенести стоп $sym в безубыток: " . $e->getMessage());
+        }
     }
 
     /** Половина позиции фиксируется на +1R, остаток ведём дальше (трейлингом) — снижает разброс результата. */
@@ -448,14 +552,23 @@ final class Worker
         return empty($f['price']) || ($f['atr'] / $f['price']) < 0.0007;
     }
 
-    private function openDirectional(string $sym, array $s, array $ins, float $weight): void
+    private function openDirectional(string $sym, array $s, array $ins, float $weight, string $regime): void
     {
         $inst = $this->market->instruments[$sym];
-        $riskMult = $ins['risk_mult'] * $this->guard->adaptiveMult($this->equity) * $this->budgetMult;
-        $riskUsd = $this->equity * $this->prof['risk_pct'] / 100 * $riskMult * min(1.2, max(0.5, $weight));
-        $qty = min($riskUsd / $s['risk'], $this->equity * $this->prof['leverage'] * 0.9 / $s['entry'], $inst->maxMktQty);
+        // Комиссия за вход+выход относительно расстояния до стопа: на 5м-стопах она съедала 50–120% R,
+        // из-за чего прибыльная сделка давала ~+0.9R, а убыточная ~−1.6R. Такие сделки не открываем вообще.
+        $feeR = Setups::feeR($s['entry'], $s['risk']);
+        if ($feeR > self::MAX_FEE_R) {
+            return;
+        }
+        // Размер — от допустимого риска и реального расстояния до стопа С УЧЁТОМ комиссий. Вес стратегии и ИИ
+        // могут только уменьшить риск (≤ 1.0): после серии плюсов риск не растёт.
+        $riskMult = min(1.0, $ins['risk_mult']) * $this->guard->adaptiveMult($this->equity) * $this->budgetMult;
+        $riskUsd = $this->equity * $this->prof['risk_pct'] / 100 * $riskMult * min(1.0, max(0.5, $weight));
+        $perUnit = $s['risk'] + 2 * ExchangeInterface::TAKER_FEE * $s['entry'];
+        $qty = min($riskUsd / $perUnit, $this->equity * $this->prof['leverage'] * 0.9 / $s['entry'], $inst->maxMktQty);
         $q = $inst->roundQty($qty);
-        if (!$inst->qtyOk($q, $s['entry'])) {
+        if (!$inst->qtyOk($q, $s['entry']) || !$this->canAddRisk($sym, (float)$q * $perUnit, (float)$q * $s['entry'])) {
             return;
         }
         $long = $s['side'] === 'Buy';
@@ -463,8 +576,57 @@ final class Worker
         $take = $inst->roundPrice($s['take'], !$long);
         $this->ex->placeMarket($sym, $s['side'], $q, $stop, $take);
         $this->directional[$sym] = ['strategy' => $s['strategy'], 'side' => $s['side'], 'entry' => $s['entry'], 'stop' => (float)$stop,
-            'qty' => (float)$q, 'regime' => $ins['regime'], 'opened_ms' => (int)(microtime(true) * 1000), 'risk_usd' => (float)$q * $s['risk']];
+            'qty' => (float)$q, 'regime' => $regime, 'opened_ms' => (int)($this->now() * 1000), 'risk_usd' => (float)$q * $s['risk']];
         // Уведомление о входе стратегии в Telegram отключено — клиент видит открытые позиции в приложении.
+    }
+
+    /** Риск (до стопа), который несёт открытая позиция/сетка — для лимитов портфеля и корреляции. */
+    private function openRisks(): array
+    {
+        $out = [];
+        foreach ($this->grids as $sym => $g) {
+            $out[$sym] = ['risk' => (float)$g->plan['max_loss'], 'notional' => (float)$g->plan['qty'] * $g->plan['levels'] * $g->plan['center']];
+        }
+        foreach ($this->directional as $sym => $d) {
+            // у ручных/внешних позиций стоп неизвестен — считаем риск как 2% номинала, чтобы они не были «бесплатными»
+            $risk = $d['risk_usd'] > 0 ? $d['risk_usd'] : 0.02 * $d['qty'] * $d['entry'];
+            $out[$sym] = ['risk' => $risk, 'notional' => $d['qty'] * $d['entry']];
+        }
+        return $out;
+    }
+
+    /**
+     * Лимиты портфеля: суммарный риск до стопов, риск внутри одной группы коррелирующих монет и общая экспозиция
+     * (номинал всех позиций относительно депозита). Одна плохая сделка или одно движение рынка не должны стирать
+     * результат десятков предыдущих — поэтому новая позиция открывается только если все три лимита соблюдены.
+     */
+    private function canAddRisk(string $sym, float $risk, float $notional): bool
+    {
+        if ($this->equity <= 0) {
+            return false;
+        }
+        $open = $this->openRisks();
+        $total = array_sum(array_column($open, 'risk')) + $risk;
+        if ($total > $this->equity * (float)($this->prof['max_portfolio_risk_pct'] ?? 100) / 100) {
+            return false;
+        }
+        $exposure = array_sum(array_column($open, 'notional')) + $notional;
+        if ($exposure > $this->equity * (float)($this->prof['max_exposure_mult'] ?? 1000)) {
+            return false;
+        }
+        foreach (self::CORRELATION_GROUPS as $group) {
+            if (!in_array($sym, $group, true)) {
+                continue;
+            }
+            $groupRisk = $risk;
+            foreach ($group as $other) {
+                $groupRisk += $open[$other]['risk'] ?? 0.0;
+            }
+            if ($groupRisk > $this->equity * (float)($this->prof['max_correlated_risk_pct'] ?? 100) / 100) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -507,13 +669,13 @@ final class Worker
             $linkId = 'manual-' . bin2hex(random_bytes(6));
             $this->ex->placeLimit($sym, $side, $q, $limitPrice, $linkId, false, $stop, $take);
             $this->pendingManual[$sym] = ['link' => $linkId, 'order_id' => (int)$o['id'], 'side' => $side, 'qty' => $qty,
-                'stop' => $stop !== null ? (float)$stop : null, 'take' => $take !== null ? (float)$take : null, 'placed_ms' => (int)(microtime(true) * 1000)];
+                'stop' => $stop !== null ? (float)$stop : null, 'take' => $take !== null ? (float)$take : null, 'placed_ms' => (int)($this->now() * 1000)];
             ($this->notify)($this->userId, "🖐 Трейдер выставил лимитный ордер: $sym " . ($long ? 'LONG' : 'SHORT') . " по $limitPrice");
             return ['status' => 'placed', 'detail' => "лимитный ордер по $limitPrice выставлен, ждём исполнения"];
         }
         $this->ex->placeMarket($sym, $side, $q, $stop, $take);
         $this->directional[$sym] = ['strategy' => 'manual', 'side' => $side, 'entry' => $price, 'stop' => $stop !== null ? (float)$stop : 0.0,
-            'qty' => $qty, 'regime' => 'manual', 'opened_ms' => (int)(microtime(true) * 1000),
+            'qty' => $qty, 'regime' => 'manual', 'opened_ms' => (int)($this->now() * 1000),
             'risk_usd' => $stop !== null ? abs($price - (float)$stop) * $qty : 0.0];
         ($this->notify)($this->userId, '🖐 Трейдер открыл ' . ($long ? '🟢 LONG' : '🔴 SHORT') . " $sym по рынку\nВход ~" . self::fmt($price)
             . ($stop !== null ? ' · SL ' . $stop : '') . ($take !== null ? ' · TP ' . $take : ''));
@@ -588,9 +750,9 @@ final class Worker
         if (isset($this->grids[$sym])) {
             $grid = $this->grids[$sym];
             try {
-                $ev = $grid->stop($this->market->feeds[$sym]->price ?? $grid->plan['center']);
+                $ev = $grid->stop($this->market->feeds[$sym]->price ?? $grid->plan['center'], $this->now());
                 if ($ev) {
-                    $this->onGridEvent($sym, $grid, $ev, $this->brain->insights[$sym]['regime'] ?? 'range');
+                    $this->onGridEvent($sym, $grid, $ev, $this->brain->regimes[$sym] ?? Regime::NO_TRADE, $this->now(), 'manual');
                 }
             } catch (\Throwable $e) {
                 Log::error("user {$this->userId}: не удалось закрыть сетку $sym по команде трейдера: " . $e->getMessage());
@@ -626,7 +788,8 @@ final class Worker
         foreach ($this->directional as $sym => $d) {
             if (isset($positions[$sym])) {
                 unset($this->directional[$sym]['gone_ms']);
-                if ($d['strategy'] !== 'manual' && $nowMs - $d['opened_ms'] > self::MAX_HOLD_SEC * 1000) {
+                $maxHold = $d['strategy'] === 'trend' ? self::TREND_MAX_HOLD_SEC : self::MAX_HOLD_SEC;
+                if ($d['strategy'] !== 'manual' && $nowMs - $d['opened_ms'] > $maxHold * 1000) {
                     $this->ex->closePosition($sym);
                 }
                 continue;
@@ -680,11 +843,13 @@ final class Worker
             if ($p === null) {
                 continue;
             }
-            if ($nowMs - $p['since_ms'] < 3000) {
+            $placed = $p['placed_ms'] ?? $p['since_ms'];
+            if ($nowMs - $placed < 3000) {
                 continue;                                      // даём бирже время провести маркет-ордер
             }
-            $closed = $this->ex->closedPnl($sym, $p['since_ms'] - 1000);
-            if (!$closed && $nowMs - $p['since_ms'] < 60_000) {
+            // с последнего учтённого события сетки — чтобы не посчитать дважды уже записанные циклы
+            $closed = $this->ex->closedPnl($sym, $p['since_ms']);
+            if (!$closed && $nowMs - $placed < 60_000) {
                 continue;                                      // ещё не отразилось в истории биржи — проверим на следующем такте
             }
             if ($closed) {
@@ -701,7 +866,7 @@ final class Worker
             $reason = $this->pendingStopReason[$sym] ?? 'stop';
             unset($this->pendingStopReason[$sym]);
             $this->onGridEvent($sym, $grid, ['kind' => 'stop', 'side' => $p['side'], 'qty' => $p['qty'], 'entry' => $p['entry'],
-                'exit' => $exit, 'pnl' => $pnl], $this->brain->insights[$sym]['regime'] ?? 'range', $now, $reason);
+                'exit' => $exit, 'pnl' => $pnl], $this->brain->regimes[$sym] ?? Regime::NO_TRADE, $now, $reason);
         }
     }
 
@@ -717,7 +882,8 @@ final class Worker
         if (in_array($strategy, ['trend', 'liquidation'], true)) {
             $this->guard->recordDirectionalTrade();
         }
-        $this->guard->onTrade($pnl, microtime(true));
+        $this->guard->onTrade($pnl, $this->now());
+        $this->trackStrategyDrawdown($strategy, $pnl);
         // Уведомления о входах/выходах и паузе в Telegram отключены — клиент смотрит сделки и статус в приложении.
     }
 
@@ -734,14 +900,94 @@ final class Worker
         ];
     }
 
-    /** Остановка клиентом: сетки закрываются, направленные сделки остаются со своими SL/TP на бирже. */
+    /**
+     * Max strategy drawdown: если реализованный результат стратегии у клиента упал от своего пика больше чем на
+     * max_strategy_dd_pct депозита — стратегия на паузе STRATEGY_PAUSE_SEC. Ручные сделки не считаются.
+     */
+    private function trackStrategyDrawdown(string $strategy, float $pnl): void
+    {
+        if ($strategy === 'manual' || $this->equity <= 0) {
+            return;
+        }
+        $st = $this->strategyPnl[$strategy] ?? ['cum' => 0.0, 'peak' => 0.0];
+        $st['cum'] += $pnl;
+        $st['peak'] = max($st['peak'], $st['cum']);
+        $limit = $this->equity * (float)($this->prof['max_strategy_dd_pct'] ?? 100) / 100;
+        if ($st['peak'] - $st['cum'] >= $limit) {
+            $this->strategyPausedUntil[$strategy] = $this->now() + self::STRATEGY_PAUSE_SEC;
+            $st = ['cum' => 0.0, 'peak' => 0.0];            // после паузы — отсчёт просадки заново
+            Log::warn("user {$this->userId}: стратегия $strategy на паузе 24ч — просадка больше {$this->prof['max_strategy_dd_pct']}% депозита");
+        }
+        $this->strategyPnl[$strategy] = $st;
+    }
+
+    /** Состояние, которое должно пережить рестарт демона (сохраняется в worker_state.risk_state). */
+    public function exportState(): array
+    {
+        return ['guard' => $this->guard->export(), 'last_grid_stop' => $this->lastGridStop, 'last_big_loss' => $this->lastBigLoss,
+            'strategy_pnl' => $this->strategyPnl, 'strategy_paused_until' => $this->strategyPausedUntil];
+    }
+
+    public function importState(array $s): void
+    {
+        $this->guard->import((array)($s['guard'] ?? []));
+        $this->lastGridStop = array_map('floatval', (array)($s['last_grid_stop'] ?? []));
+        $this->lastBigLoss = array_map('floatval', (array)($s['last_big_loss'] ?? []));
+        $this->strategyPnl = (array)($s['strategy_pnl'] ?? []);
+        $this->strategyPausedUntil = array_map('floatval', (array)($s['strategy_paused_until'] ?? []));
+    }
+
+    /** Kill switch: отменить все ордера сеток и закрыть по рынку все позиции клиента, включая ручные и внешние. */
+    private function emergencyFlatten(): void
+    {
+        if ($this->haltDone) {
+            return;
+        }
+        foreach ($this->grids as $sym => $grid) {
+            try {
+                $ev = $grid->stop($this->market->feeds[$sym]->price ?? $grid->plan['center'], $this->now());
+                if ($ev) {
+                    $this->onGridEvent($sym, $grid, $ev, $this->brain->regimes[$sym] ?? Regime::NO_TRADE, $this->now(), 'emergency');
+                }
+            } catch (\Throwable $e) {
+                Log::error("user {$this->userId}: аварийная остановка — сетка $sym: " . $e->getMessage());
+            }
+        }
+        foreach ($this->pendingManual as $sym => $p) {
+            try {
+                $this->ex->cancel($sym, $p['link']);
+            } catch (\Throwable) {
+            }
+        }
+        $this->pendingManual = [];
+        foreach (array_keys($this->ex->positions()) as $sym) {
+            try {
+                $this->ex->closePosition($sym);
+            } catch (\Throwable $e) {
+                Log::error("user {$this->userId}: аварийная остановка — позиция $sym: " . $e->getMessage());
+            }
+        }
+        $this->haltDone = true;
+        Log::warn("user {$this->userId}: АВАРИЙНАЯ ОСТАНОВКА — позиции закрыты");
+    }
+
+    /**
+     * Остановка воркера. Бумажный счёт живёт только в памяти — его сетки закрываем, иначе позиции просто исчезнут.
+     * На реальной бирже сетки НЕ закрываем по рынку (это фиксировало плавающий убыток на каждом рестарте):
+     * снимаем ордера на новые входы, а набранная позиция остаётся с тейками и стоп-лоссом на бирже; после
+     * запуска её подхватит reconcileExternalPositions() и запишет результат в статистику при закрытии.
+     */
     public function shutdown(): void
     {
         foreach ($this->grids as $sym => $grid) {
             try {
-                $ev = $grid->stop($this->market->feeds[$sym]->price ?? $grid->plan['center']);
-                if ($ev) {
-                    $this->onGridEvent($sym, $grid, $ev, $this->brain->insights[$sym]['regime'] ?? 'range');
+                if ($this->ex->mode() === 'paper') {
+                    $ev = $grid->stop($this->market->feeds[$sym]->price ?? $grid->plan['center'], $this->now());
+                    if ($ev) {
+                        $this->onGridEvent($sym, $grid, $ev, $this->brain->regimes[$sym] ?? Regime::NO_TRADE, $this->now());
+                    }
+                } else {
+                    $grid->detach();
                 }
             } catch (\Throwable $e) {
                 Log::error("user {$this->userId}: не удалось остановить сетку $sym: " . $e->getMessage());

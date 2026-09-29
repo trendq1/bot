@@ -4,9 +4,11 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const usd = (v, sign = false) => (v == null ? "—" : (sign && v > 0 ? "+" : "") + Number(v).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " $");
 const cls = (v) => (v > 0 ? "pos" : v < 0 ? "neg" : "");
 const dt = (s) => (s ? new Date(s + (s.endsWith("Z") ? "" : "Z")).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—");
-const STRAT = { grid: "Сетка", trend: "Тренд", liquidation: "Ликвидации" };
+const STRAT = { grid: "Сетка", trend: "Тренд", liquidation: "Ликвидации", manual: "Вручную" };
 const PROFILE = { conservative: "Консерв.", balanced: "Сбаланс.", aggressive: "Агрес." };
-const REGIME = { trend_up: "Тренд ↑", trend_down: "Тренд ↓", range: "Боковик", high_volatility: "Волатильно" };
+const REGIME = { trend_up: "Тренд ↑", trend_down: "Тренд ↓", range: "Боковик", high_volatility: "Волатильно",
+  strong_up: "Сильный тренд ↑", strong_down: "Сильный тренд ↓", weak_trend: "Неясно (не торгуем)", breakout: "Пробой",
+  no_trade: "Нет сделки", manual: "Вручную", external: "Вне бота" };
 
 async function api(path, opts = {}) {
   const res = await fetch("api/index.php" + path, {
@@ -127,7 +129,7 @@ VIEWS.overview = async () => {
     </div>
     <div class="card"><h3>Доходы и расходы по дням</h3><div class="chart" id="finChart"></div>
       <div class="legend"><span><i style="background:#3987e5"></i>Доход</span><span><i style="background:#d95926"></i>Расход</span></div></div>
-    <div class="card"><h3>Trade Analytics <span class="muted small">— не Win Rate, а реальная математика сделок</span></h3><div class="grid kpis" id="taKpis">Загрузка…</div></div>
+    <div class="card"><h3>Trade Analytics <span class="muted small">— не Win Rate, а реальная математика сделок</span></h3><div class="grid kpis" id="taKpis">Загрузка…</div><div id="taBreak"></div></div>
     <div class="grid cols2">
       <div class="card"><h3>Торговый движок</h3>${engineBlock(d.engine)}</div>
       <div class="card"><h3>Последние оплаты</h3>${table(["Клиент", "Тариф", "⭐", "$", "Когда"], d.recent_payments.map((p) => `<tr><td>${esc(p.user)}</td><td>${p.plan}</td><td>${p.stars}</td><td>${usd(p.usd)}</td><td>${dt(p.at)}</td></tr>`))}
@@ -135,14 +137,27 @@ VIEWS.overview = async () => {
     </div>`;
   barsChart($("finChart"), d.series);
   api("/analytics?days=" + days).then((t) => {
+    const nz = (v) => (v == null ? "—" : v);
+    const g = t.grid_sessions || {};
     $("taKpis").innerHTML = `
-      ${kpi("Profit Factor", t.profit_factor == null ? "—" : t.profit_factor, t.profit_factor != null && t.profit_factor < 1 ? "< 1 — убыточно" : "", t.profit_factor != null ? cls(t.profit_factor - 1) : "")}
-      ${kpi("Expectancy / сделку", usd(t.expectancy_usd, true), `${t.trades} сделок`, cls(t.expectancy_usd))}
-      ${kpi("Net PnL за период", usd(t.net_pnl, true), "", cls(t.net_pnl))}
-      ${kpi("Крупнейший убыток", usd(t.largest_loss), "")}
-      ${kpi("Доля топ-5% убытков", t.top5pct_losses_share_pct + "%", "от суммы всех убытков")}
-      ${kpi("Просадка (реал. PnL)", usd(t.max_drawdown_realized), "от локального пика")}
+      ${kpi("Profit Factor", nz(t.profit_factor), t.profit_factor != null && t.profit_factor < 1 ? "< 1 — убыточно" : "", t.profit_factor != null ? cls(t.profit_factor - 1) : "")}
+      ${kpi("Expectancy / сделку", usd(t.expectancy_usd, true), `${t.trades} сделок · ${nz(t.expectancy_r)}R`, cls(t.expectancy_usd))}
+      ${kpi("Net PnL за период", usd(t.net_pnl, true), `Win Rate ${t.win_rate_pct}% (не главное)`, cls(t.net_pnl))}
+      ${kpi("Ср. плюс / ср. минус", `${usd(t.avg_win)} / ${usd(t.avg_loss)}`, `отношение ${nz(t.win_loss_ratio)}`)}
+      ${kpi("Крупнейший убыток", usd(t.largest_loss), `крупнейший плюс ${usd(t.largest_win)}`)}
+      ${kpi("Хвост убытков", `${t.tail_loss_share_pct.top5}%`, `топ-1%: ${t.tail_loss_share_pct.top1}% · топ-10%: ${t.tail_loss_share_pct.top10}% всех убытков`)}
+      ${kpi("Просадка (реал. PnL)", usd(t.max_drawdown), `Recovery factor ${nz(t.recovery_factor)}`)}
+      ${kpi("Сессии сетки", `${g.sessions || 0} · PF ${nz(g.profit_factor)}`, `1 стоп = ${nz(g.cycles_per_stop)} циклов · худшая ${usd(g.worst_session || 0)}`, g.profit_factor != null ? cls(g.profit_factor - 1) : "")}
     `;
+    const rows = (obj, label) => Object.entries(obj || {}).map(([k, v]) => `<tr><td>${esc(label(k))}</td><td class="num">${v.trades}</td>
+      <td class="num ${cls(v.net_pnl)}">${usd(v.net_pnl, true)}</td><td class="num">${nz(v.profit_factor)}</td><td class="num">${usd(v.expectancy_usd, true)}</td>
+      <td class="num">${v.win_rate_pct}%</td><td class="num">${usd(v.largest_loss)}</td></tr>`);
+    const head = ["", "Сделок", "Net", "PF", "Expectancy", "Win Rate", "Худшая"];
+    $("taBreak").innerHTML = `<div class="grid cols2">
+      <div><h4>По стратегиям</h4>${table(head, rows(t.by_strategy, (k) => STRAT[k] || k))}</div>
+      <div><h4>По режимам рынка</h4>${table(head, rows(t.by_regime, (k) => REGIME[k] || k))}</div>
+      <div><h4>По монетам</h4>${table(head, rows(t.by_symbol, (k) => k))}</div>
+      <div><h4>По часам (UTC)</h4>${table(head, rows(t.by_hour_utc, (k) => k + ":00"))}</div></div>`;
   }).catch(() => { $("taKpis").innerHTML = '<div class="muted">Нет данных</div>'; });
 };
 
@@ -315,8 +330,8 @@ VIEWS.ai = async () => {
   const syms = d.symbols;
   $("view").innerHTML = `
     <div class="card"><h3>Рынок сейчас <span class="muted small">· ИИ ${d.engine.ai_enabled ? "подключён" : "не подключён (нужен ключ Anthropic)"}${d.engine.alive ? "" : " · ⛔ движок не запущен"}</span></h3>
-      ${table(["Монета", "Цена", "Режим", "Сетка", "Шаг, ATR", "Веса сетка/тренд/ликв.", "Риск", "Источник", "Вывод"], d.market.map((m) =>
-        `<tr><td>${m.symbol}</td><td class="num">${m.price}</td><td>${REGIME[m.regime] || m.regime}</td><td>${m.grid_mode}</td><td>${Number(m.grid_step_atr).toFixed(2)}</td><td class="num">${[m.w_grid, m.w_trend, m.w_liquidation].map((w) => Math.round(w * 100)).join(" / ")}</td><td>×${Number(m.risk_mult).toFixed(2)}</td><td>${m.source === "ai" ? "ИИ" : "алгоритм"}</td><td class="small">${esc(m.summary)}</td></tr>`))}</div>
+      ${table(["Монета", "Цена", "Режим (жёсткий, 1h)", "Режим ИИ", "Сетка", "Шаг, ATR", "Веса сетка/тренд/ликв.", "Риск", "Источник", "Вывод"], d.market.map((m) =>
+        `<tr><td>${m.symbol}</td><td class="num">${m.price}</td><td><b>${REGIME[m.hard_regime] || m.hard_regime}</b></td><td>${REGIME[m.regime] || m.regime}</td><td>${m.grid_mode}</td><td>${Number(m.grid_step_atr).toFixed(2)}</td><td class="num">${[m.w_grid, m.w_trend, m.w_liquidation].map((w) => Math.round(w * 100)).join(" / ")}</td><td>×${Number(m.risk_mult).toFixed(2)}</td><td>${m.source === "ai" ? "ИИ" : "алгоритм"}</td><td class="small">${esc(m.summary)}</td></tr>`))}</div>
     <div class="grid cols2">
       <div class="card"><h3>Уроки (память ИИ)</h3>
         <div class="row"><input class="inp" id="lText" placeholder="Добавить свой урок / правило для ИИ"><button class="btn primary" id="lAdd">Добавить</button></div>

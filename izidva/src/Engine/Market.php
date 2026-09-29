@@ -81,6 +81,14 @@ final class Market
         $feed->klinesTs = microtime(true);
     }
 
+    public function refreshKlines1h(string $symbol): void
+    {
+        $r = $this->api->get('/v5/market/kline', ['category' => 'linear', 'symbol' => $symbol, 'interval' => '60', 'limit' => 250]);
+        $feed = $this->feeds[$symbol];
+        $feed->klines1h = array_reverse($r['list'] ?? []);
+        $feed->klines1hTs = microtime(true);
+    }
+
     /** Обработка ликвидаций: S=Buy — ликвидирован лонг. */
     public function onWsMessage(string $raw): void
     {
@@ -152,6 +160,15 @@ final class Market
                 } catch (\Throwable $e) {
                     $this->feeds[$s]->klinesTs = microtime(true) - 30;     // не долбим API при сбое
                     Log::warn("$s: свечи не загрузились: " . $e->getMessage());
+                }
+            }
+            if ($budget > 0 && microtime(true) - $this->feeds[$s]->klines1hTs > 300) {
+                $budget--;
+                try {
+                    $this->refreshKlines1h($s);
+                } catch (\Throwable $e) {
+                    $this->feeds[$s]->klines1hTs = microtime(true) - 240;
+                    Log::warn("$s: часовые свечи не загрузились: " . $e->getMessage());
                 }
             }
         }

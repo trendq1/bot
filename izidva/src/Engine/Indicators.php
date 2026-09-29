@@ -139,6 +139,10 @@ final class Indicators
             'low_5' => min(array_slice($l, -7, 6)), 'high_5' => max(array_slice($h, -7, 6)),
             'low_10' => min(array_slice($l, -12, 11)), 'high_10' => max(array_slice($h, -12, 11)),
             'ema20_1' => $e20[$n - 2],
+            'ema50_1' => $e50[$n - 2],
+            'ema50_slope_pct' => $e50[$n - 13] ? ($e50[$n - 1] - $e50[$n - 13]) / $e50[$n - 13] * 100 : 0.0,
+            // диапазон последних 24 закрытых свечей — для RANGE-сетки (на 1h это сутки)
+            'hi_24' => max(array_slice($h, -25, 24)), 'lo_24' => min(array_slice($l, -25, 24)),
         ];
     }
 

@@ -98,7 +98,12 @@ final class Manager
             $this->syncWorkers();
             $this->ts['sync'] = $now;
         }
+        $halt = (bool)Settings::get('kill_switch');
+        $platform = ['grid' => (bool)Settings::get('strategy_grid_enabled'), 'trend' => (bool)Settings::get('strategy_trend_enabled'),
+            'liquidation' => (bool)Settings::get('strategy_liquidation_enabled')];
         foreach ($this->workers as $uid => $w) {
+            $w->halted = $halt;
+            $w->platformEnabled = $platform;
             try {
                 $w->step($now);
             } catch (\Throwable $e) {
@@ -118,11 +123,10 @@ final class Manager
 
     public function refreshFeatures(): void
     {
-        foreach ($this->market->feeds as $sym => $feed) {
-            $f = Indicators::features($feed->klines, $feed->price);
-            if ($f) {
-                $this->brain->features[$sym] = $f;
-                $this->brain->insights[$sym] ??= AIAnalyst::ruleInsight($f, $this->brain->tuning[$sym] ?? []);
+        foreach ($this->market->symbols as $sym) {
+            $this->brain->refresh($sym, $this->market->feeds[$sym]);
+            if (isset($this->brain->features[$sym])) {
+                $this->brain->insights[$sym] ??= AIAnalyst::ruleInsight($this->brain->features[$sym], $this->brain->tuning[$sym] ?? []);
             }
         }
     }
@@ -238,7 +242,20 @@ final class Manager
             $strategies, fn($u, $t) => $this->recordTrade($u, $t), fn($u, $m) => $this->notify($u, $m),
             fn($u, $e) => $this->saveSnapshot($u, $e), (bool)($r['manual_mode'] ?? false),
             fn($id, $status, $detail) => $this->updateManualOrder($id, $status, $detail), (float)($r['budget_mult'] ?? 1.0));
+        $saved = DB::val('SELECT risk_state FROM worker_state WHERE user_id = ?', [$uid]);
+        if ($saved) {
+            $this->workers[$uid]->importState(json_decode((string)$saved, true) ?: []);
+        }
         Log::info("user $uid: запущен ({$r['trading_mode']}, {$r['risk_profile']}" . (($r['manual_mode'] ?? false) ? ', ручной режим' : '') . ')');
+    }
+
+    private function saveWorkerState(int $uid, Worker $w): void
+    {
+        DB::q('INSERT INTO worker_state (user_id, status, equity, day_pnl_pct, live, risk_state, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON DUPLICATE KEY UPDATE status = VALUES(status), equity = VALUES(equity), day_pnl_pct = VALUES(day_pnl_pct),
+               live = VALUES(live), risk_state = VALUES(risk_state), updated_at = VALUES(updated_at)',
+            [$uid, $w->status, $w->equity, round($w->guard->dayPnlPct($w->equity), 2),
+                json_encode($w->liveState(), JSON_UNESCAPED_UNICODE), json_encode($w->exportState()), DB::now()]);
     }
 
     public function stopWorker(int $uid): void
@@ -248,6 +265,7 @@ final class Manager
             return;
         }
         $w->shutdown();
+        $this->saveWorkerState($uid, $w);
         unset($this->workers[$uid]);
         DB::update('worker_state', ['status' => 'остановлен', 'live' => ['grids' => [], 'directional' => []], 'updated_at' => DB::now()],
             'user_id = :u', [':u' => $uid]);
@@ -351,11 +369,7 @@ final class Manager
     public function publish(): void
     {
         foreach ($this->workers as $uid => $w) {
-            DB::q('INSERT INTO worker_state (user_id, status, equity, day_pnl_pct, live, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-                   ON DUPLICATE KEY UPDATE status = VALUES(status), equity = VALUES(equity), day_pnl_pct = VALUES(day_pnl_pct),
-                   live = VALUES(live), updated_at = VALUES(updated_at)',
-                [$uid, $w->status, $w->equity, round($w->guard->dayPnlPct($w->equity), 2),
-                    json_encode($w->liveState(), JSON_UNESCAPED_UNICODE), DB::now()]);
+            $this->saveWorkerState($uid, $w);
         }
         $symbols = [];
         foreach ($this->market->feeds as $sym => $feed) {
@@ -363,6 +377,7 @@ final class Manager
                 'price' => $feed->price, 'funding' => $feed->funding, 'has_klines' => (bool)$feed->klines,
                 'liq_long_1h' => round($feed->liqSum('long', 3600)), 'liq_short_1h' => round($feed->liqSum('short', 3600)),
                 'features' => $this->brain->features[$sym] ?? null,
+                'regime' => $this->brain->regimes[$sym] ?? null,
                 'insight' => $this->brain->insights[$sym] ?? null,
             ];
         }

@@ -11,6 +11,9 @@ final class SymbolFeed
     /** свечи 5м от старых к новым */
     public array $klines = [];
     public float $klinesTs = 0.0;
+    /** свечи 1h от старых к новым — для режима рынка и трендовой стратегии */
+    public array $klines1h = [];
+    public float $klines1hTs = 0.0;
     /** [ts, price] */
     public array $prices = [];
     /** [ts, 'long'|'short', usd] */

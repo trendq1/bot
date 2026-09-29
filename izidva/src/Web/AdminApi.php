@@ -300,46 +300,10 @@ final class AdminApi
     private static function analytics(int $days): array
     {
         $since = gmdate('Y-m-d H:i:s', time() - $days * 86400);
-        $rows = DB::all('SELECT pnl, closed_at FROM trades WHERE closed_at >= ? ORDER BY closed_at', [$since]);
-        $n = count($rows);
-        $grossWin = 0.0;
-        $grossLoss = 0.0;
-        $sumPnl = 0.0;
-        $largest = 0.0;
-        $losses = [];
-        foreach ($rows as $r) {
-            $p = (float)$r['pnl'];
-            $sumPnl += $p;
-            if ($p > 0) {
-                $grossWin += $p;
-            } else {
-                $grossLoss += -$p;
-                $losses[] = -$p;
-            }
-            $largest = min($largest, $p);
-        }
-        rsort($losses);
-        $top5 = array_sum(array_slice($losses, 0, max(1, (int)ceil(count($losses) * 0.05))));
-        // просадка по кривой накопленного РЕАЛИЗОВАННОГО PnL всех клиентов вместе — не по эквити
-        // (эквити у каждого клиента своя, платформенной суммы не существует), но даёт ту же картину:
-        // насколько глубоко проваливался итог между локальными пиками.
-        $peak = 0.0;
-        $cum = 0.0;
-        $maxDd = 0.0;
-        foreach ($rows as $r) {
-            $cum += (float)$r['pnl'];
-            $peak = max($peak, $cum);
-            $maxDd = min($maxDd, $cum - $peak);
-        }
-        return [
-            'period_days' => $days, 'trades' => $n, 'net_pnl' => round($sumPnl, 2),
-            'gross_win' => round($grossWin, 2), 'gross_loss' => round($grossLoss, 2),
-            'profit_factor' => $grossLoss > 0 ? round($grossWin / $grossLoss, 2) : null,
-            'expectancy_usd' => $n ? round($sumPnl / $n, 4) : 0.0,
-            'largest_loss' => round($largest, 2),
-            'top5pct_losses_share_pct' => $grossLoss > 0 ? round($top5 / $grossLoss * 100, 1) : 0.0,
-            'max_drawdown_realized' => round($maxDd, 2),
-        ];
+        $rows = DB::all('SELECT pnl, r, strategy, symbol, regime, session_id, kind, closed_at FROM trades WHERE closed_at >= ? ORDER BY closed_at, id', [$since]);
+        // просадка — по кривой накопленного РЕАЛИЗОВАННОГО PnL всех клиентов вместе (у каждого клиента своя
+        // equity, платформенной суммы не существует), но картина та же: насколько глубоко проваливался итог.
+        return ['period_days' => $days] + \App\Engine\TradeStats::compute($rows);
     }
 
     // ───────────── клиенты ─────────────

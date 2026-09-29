@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace App\Engine;
 
+use App\Log;
+
 /**
  * Адаптивная сетка лимитных ордеров.
  * long: покупки на уровнях ниже центра; после покупки — продажа на шаг выше (reduce-only).
@@ -32,6 +34,10 @@ final class Grid
     public ?array $pendingStop = null;
     /** Когда сетка запущена — для грубой оценки funding за время удержания инвентаря (см. Worker::fundingEstimate). */
     public float $startedAt = 0.0;
+    /** Время (мс) последнего учтённого события сетки — граница, с которой искать в closed-pnl результат стопа. */
+    public int $lastEventMs = 0;
+    /** Стоп-лосс позиции уже выставлен на бирже (ставим при первом исполненном уровне). */
+    public bool $exchangeStopSet = false;
 
     /** @param array{mode:string,center:float,step_pct:float,levels:int,qty:string,max_loss:float} $plan */
     public function __construct(private ExchangeInterface $ex, public string $symbol, private Instrument $inst, public array $plan)
@@ -94,24 +100,42 @@ final class Grid
         $this->orders[$link] = ['level' => $level, 'kind' => $kind, 'side' => $side, 'price' => (float)$p, 'open_price' => $openPrice];
     }
 
-    public function start(): void
+    public function start(?float $now = null): void
     {
         $this->ex->cancelAll($this->symbol);
         for ($i = 1; $i <= $this->plan['levels']; $i++) {
             $this->place('open', $i, $this->levelPrice($i));
         }
         $this->active = true;
-        $this->startedAt = microtime(true);
+        $this->startedAt = $now ?? microtime(true);
+        $this->lastEventMs = (int)($this->startedAt * 1000);
+    }
+
+    /**
+     * Стоп сетки как настоящий стоп-лосс позиции на бирже, а не только проверка в коде демона: если демон упал,
+     * перезапускается или завис, позиция всё равно закроется на уровне стопа, а не уйдёт в неограниченный убыток.
+     */
+    private function ensureExchangeStop(): void
+    {
+        if ($this->exchangeStopSet || !$this->inventory) {
+            return;
+        }
+        try {
+            $this->ex->setStopLoss($this->symbol, $this->inst->roundPrice($this->stopPrice(), $this->dir() === -1));
+            $this->exchangeStopSet = true;
+        } catch (\Throwable $e) {
+            Log::warn("{$this->symbol}: стоп сетки на бирже не выставлен (повторим на следующем такте): " . $e->getMessage());
+        }
     }
 
     /** @return list<array{kind:string,side:string,qty:float,entry:float,exit:float,pnl:float}> */
-    public function sync(float $price): array
+    public function sync(float $price, ?float $now = null): array
     {
         if (!$this->active) {
             return [];
         }
         if ($this->inventory && $this->dir() * ($price - $this->stopPrice()) <= 0) {
-            $ev = $this->stop($price);
+            $ev = $this->stop($price, $now);
             return $ev ? [$ev] : [];
         }
         $events = [];
@@ -141,6 +165,9 @@ final class Grid
                 $qty = (float)$this->plan['qty'];
                 $pnl = $this->dir() * ($fill - $entry) * $qty - ($entry + $fill) * $qty * ExchangeInterface::MAKER_FEE;
                 $events[] = ['kind' => 'cycle', 'side' => $this->openSide(), 'qty' => $qty, 'entry' => $entry, 'exit' => $fill, 'pnl' => $pnl];
+                if (!$this->inventory) {
+                    $this->exchangeStopSet = false;           // позиции больше нет — у следующей будет свой стоп
+                }
                 if (!$this->draining) {
                     $this->place('open', $o['level'], $this->levelPrice($o['level']));
                 }
@@ -149,11 +176,28 @@ final class Grid
                 $this->place('close', $o['level'], $o['price'], $o['open_price']);
             }
         }
+        $this->ensureExchangeStop();
         if ($this->draining && !$this->inventory) {
             $this->ex->cancelAll($this->symbol);
             $this->active = false;
         }
         return $events;
+    }
+
+    /**
+     * Отпустить сетку при остановке демона на реальной бирже: снимаем только ордера на новые входы, а уже набранная
+     * позиция остаётся со своими тейками и стоп-лоссом на бирже. Раньше при каждом рестарте все сетки закрывались
+     * по рынку — это фиксировало плавающий убыток (например, −10.5$ за одну секунду 27.09 в 14:46).
+     */
+    public function detach(): void
+    {
+        foreach ($this->orders as $link => $o) {
+            if ($o['kind'] === 'open') {
+                $this->ex->cancel($this->symbol, (string)$link);
+            }
+        }
+        $this->ensureExchangeStop();
+        $this->active = false;
     }
 
     /** Мягкая остановка: новых входов нет, открытые уровни закрываются по своим тейкам. */
@@ -179,7 +223,7 @@ final class Grid
      * в статистике и в обучении (Learner). Поэтому для live/demo только отправляем закрытие и запоминаем
      * pendingStop — реальный PnL по факту с биржи досчитает Worker::checkGridStops() на следующих тактах.
      */
-    public function stop(float $price): ?array
+    public function stop(float $price, ?float $now = null, bool $closedByExchange = false): ?array
     {
         $this->ex->cancelAll($this->symbol);
         $this->orders = [];
@@ -187,15 +231,19 @@ final class Grid
         if (!$this->inventory) {
             return null;
         }
-        $closed = $this->ex->closePosition($this->symbol);
+        $nowMs = (int)(($now ?? microtime(true)) * 1000);
+        $closed = $closedByExchange ? null : $this->ex->closePosition($this->symbol);
         $qty = (float)$this->plan['qty'] * count($this->inventory);
         $entry = array_sum($this->inventory) / count($this->inventory);
         $this->inventory = [];
-        if (!$closed) {
-            return null;
-        }
-        if ($this->ex->mode() !== 'paper') {
-            $this->pendingStop = ['side' => $this->openSide(), 'qty' => $qty, 'entry' => $entry, 'since_ms' => (int)(microtime(true) * 1000)];
+        $this->exchangeStopSet = false;
+        if (!$closed || $this->ex->mode() !== 'paper') {
+            // Позицию уже закрыл стоп-лосс на бирже, или это реальная биржа (цена исполнения известна не сразу) —
+            // результат заберёт Worker::checkGridStops() из closed-pnl, начиная с последнего учтённого события сетки.
+            // Если позиции к моменту нашего стопа уже не было ($closed === null) — её закрыла биржа РАНЬШЕ, запись
+            // о закрытии старше «сейчас», поэтому ищем от последнего учтённого события, а не от текущего момента.
+            $since = ($closedByExchange || !$closed) ? $this->lastEventMs + 1 : max($this->lastEventMs + 1, $nowMs - 1000);
+            $this->pendingStop = ['side' => $this->openSide(), 'qty' => $qty, 'entry' => $entry, 'since_ms' => $since, 'placed_ms' => $nowMs];
             return null;
         }
         $exit = $closed[0];

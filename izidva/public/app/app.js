@@ -27,7 +27,8 @@ const $ = (id) => document.getElementById(id);
 const state = { me: null, month: new Date(), exMode: "demo", draft: null, payMethod: "stars" };
 const locale = () => (LANG === "ru" ? "ru-RU" : "uk-UA");
 const STRAT = () => ({ grid: t("grid_title"), trend: t("trend_title"), liquidation: t("liquidation_title") });
-const REGIME = () => ({ trend_up: t("regime_trend_up"), trend_down: t("regime_trend_down"), range: t("regime_range"), high_volatility: t("regime_high_volatility") });
+const REGIME = () => ({ trend_up: t("regime_trend_up"), trend_down: t("regime_trend_down"), range: t("regime_range"), high_volatility: t("regime_high_volatility"),
+  strong_up: t("regime_strong_up"), strong_down: t("regime_strong_down"), weak_trend: t("regime_weak_trend"), breakout: t("regime_breakout"), no_trade: t("regime_no_trade") });
 
 // ───────────── утилиты ─────────────
 const COIN_COLORS = ["#f7931a", "#8ba4ff", "#14f195", "#7d92ff", "#22e6a0", "#fab219", "#8b5cf6", "#22c3e6"];

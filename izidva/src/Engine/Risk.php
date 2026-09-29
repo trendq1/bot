@@ -9,20 +9,25 @@ final class Risk
     /**
      * code => параметры. grid_levels держим малым: полный стоп сетки = levels×(levels+2)/2 циклов прибыли
      * (6 уровней — 24 цикла, 4 — 12), иначе один стоп стирает целый день мелких плюсов.
+     * Лимиты портфеля (max_*_risk_pct) — в % депозита от суммы риска до стопов; max_correlated_risk_pct должен
+     * вмещать одну сетку при максимальном бюджете клиента (grid_max_loss_pct × 1.5), иначе сетка не откроется никогда.
      */
     public const PROFILES = [
-        'conservative' => ['title' => 'Консервативный', 'risk_pct' => 0.3, 'rr' => 1.2, 'leverage' => 5, 'grid_alloc' => 0.30,
-            'grid_levels' => 3, 'grid_max_loss_pct' => 1.5, 'max_grids' => 2, 'max_directional' => 1,
+        'conservative' => ['title' => 'Консервативный', 'risk_pct' => 0.3, 'rr' => 2.0, 'leverage' => 5, 'grid_alloc' => 0.30,
+            'grid_levels' => 3, 'grid_max_loss_pct' => 1.0, 'max_grids' => 2, 'max_directional' => 1,
             'daily_loss_pct' => 2.0, 'max_consecutive_losses' => 3, 'max_directional_trades_per_day' => 4,
-            'max_total_grid_risk_pct' => 3.0, 'max_floating_loss_pct' => 4.0],
-        'balanced' => ['title' => 'Сбалансированный', 'risk_pct' => 0.5, 'rr' => 1.2, 'leverage' => 15, 'grid_alloc' => 0.45,
-            'grid_levels' => 4, 'grid_max_loss_pct' => 2.5, 'max_grids' => 3, 'max_directional' => 2,
+            'max_total_grid_risk_pct' => 2.0, 'max_floating_loss_pct' => 3.0,
+            'max_portfolio_risk_pct' => 2.0, 'max_correlated_risk_pct' => 1.5, 'max_exposure_mult' => 2.0, 'max_strategy_dd_pct' => 2.0],
+        'balanced' => ['title' => 'Сбалансированный', 'risk_pct' => 0.5, 'rr' => 2.0, 'leverage' => 15, 'grid_alloc' => 0.45,
+            'grid_levels' => 4, 'grid_max_loss_pct' => 1.5, 'max_grids' => 2, 'max_directional' => 2,
             'daily_loss_pct' => 3.0, 'max_consecutive_losses' => 4, 'max_directional_trades_per_day' => 6,
-            'max_total_grid_risk_pct' => 7.5, 'max_floating_loss_pct' => 6.0],
-        'aggressive' => ['title' => 'Агрессивный', 'risk_pct' => 1.0, 'rr' => 1.0, 'leverage' => 25, 'grid_alloc' => 0.60,
-            'grid_levels' => 5, 'grid_max_loss_pct' => 4.0, 'max_grids' => 4, 'max_directional' => 3,
+            'max_total_grid_risk_pct' => 3.0, 'max_floating_loss_pct' => 4.0,
+            'max_portfolio_risk_pct' => 4.0, 'max_correlated_risk_pct' => 2.5, 'max_exposure_mult' => 3.0, 'max_strategy_dd_pct' => 3.0],
+        'aggressive' => ['title' => 'Агрессивный', 'risk_pct' => 1.0, 'rr' => 2.0, 'leverage' => 25, 'grid_alloc' => 0.60,
+            'grid_levels' => 5, 'grid_max_loss_pct' => 2.5, 'max_grids' => 3, 'max_directional' => 3,
             'daily_loss_pct' => 5.0, 'max_consecutive_losses' => 5, 'max_directional_trades_per_day' => 10,
-            'max_total_grid_risk_pct' => 16.0, 'max_floating_loss_pct' => 10.0],
+            'max_total_grid_risk_pct' => 6.0, 'max_floating_loss_pct' => 8.0,
+            'max_portfolio_risk_pct' => 8.0, 'max_correlated_risk_pct' => 4.0, 'max_exposure_mult' => 5.0, 'max_strategy_dd_pct' => 5.0],
     ];
 
     public static function profile(string $code): array
