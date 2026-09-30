@@ -163,7 +163,7 @@ final class Signals
     }
 
     /**
-     * Общий вход для любого источника: посчитать пост, разобрать, проверить, снять дубль, положить в очередь.
+     * Общий вход для любого источника: посчитать пост, разобрать, проверить, положить в очередь.
      * @return array{status:string,id:?int,message:string} status = new|rejected|duplicate|update|ignored
      */
     public static function receive(array $ch, string $text, ?int $reply, string $source = ''): array
@@ -224,14 +224,7 @@ final class Signals
             $say("⚠️ Сигнал {$s['symbol']} отклонён: $error. Ничего не открыто.");
             return ['status' => 'rejected', 'id' => $id, 'message' => $error];
         }
-        $mid = ($s['entry_lo'] + $s['entry_hi']) / 2;
-        $dupe = DB::val("SELECT id FROM signals WHERE kind = 'signal' AND symbol = ? AND side = ? AND status IN ('new','processed') AND created_at > ?
-            AND ABS((entry_lo + entry_hi) / 2 - ?) / ? < 0.015 LIMIT 1", [$s['symbol'], $s['side'], gmdate('Y-m-d H:i:s', time() - 12 * 3600), $mid, $mid]);
-        if ($dupe) {
-            $id = DB::insert('signals', $row + ['status' => 'duplicate', 'summary' => "дубль сигнала #$dupe"]);
-            $say("♻️ {$s['symbol']}: дубль сигнала #$dupe (тот же вход за последние 12 часов) — второй раз не открываю.");
-            return ['status' => 'duplicate', 'id' => $id, 'message' => "дубль #$dupe"];
-        }
+        // Дублей по времени нет: повторный сигнал по монете исполняется, если у клиента нет позиции/ордера по ней (проверяет Worker::signalOrder)
         $id = DB::insert('signals', $row + ['status' => 'new']);
         $say("📡 Сигнал #$id принят: {$s['symbol']} " . ($s['side'] === 'Buy' ? 'LONG' : 'SHORT') . ", вход {$s['entry_lo']}–{$s['entry_hi']}, стоп {$s['stop']}, целей "
             . count($s['targets']) . ". Исполняю клиентам, отчёт пришлю сюда.");

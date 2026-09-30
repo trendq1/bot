@@ -1700,7 +1700,7 @@ test('Manager::processSignals: демо-клиентам исполняется,
     check((int)DB::val('SELECT COUNT(*) FROM signal_orders WHERE signal_id = ?', [$sid]) === 1, 'повторный проход не дублирует исполнение');
 });
 
-test('Webhook: сигнал принимается только от разрешённого источника; дубль и отклонённый сигнал не исполняются', function () use ($SIG_SOL) {
+test('Webhook: сигнал принимается только от разрешённого источника; повтор идёт в очередь (воркер сам пропустит, если позиция уже есть), отклонённый не исполняется', function () use ($SIG_SOL) {
     Settings::save(['signal_enabled' => true, 'signal_allowed_ids' => ['777001', '-1001234']]);
     $SIG_SOL = str_replace('#SOL', '#LINK', $SIG_SOL);          // другая монета, чтобы не пересечься с сигналом из предыдущего теста
     $before = (int)DB::val("SELECT COUNT(*) FROM signals");
@@ -1710,7 +1710,7 @@ test('Webhook: сигнал принимается только от разре�
     \App\Web\Webhook::handle($msg($SIG_SOL, 777001));
     check((int)DB::val("SELECT COUNT(*) FROM signals WHERE status = 'new'") === 1, 'пересланный сигнал от вашего ID принят и ждёт исполнения');
     \App\Web\Webhook::handle($msg(str_replace(['120.4', '121.7'], ['120.5', '121.8'], $SIG_SOL), 777001));
-    check((int)DB::val("SELECT COUNT(*) FROM signals WHERE status = 'duplicate'") === 1, 'почти тот же сигнал (вход отличается на 0.1%) — дубль, второй раз не исполняется');
+    check((int)DB::val("SELECT COUNT(*) FROM signals WHERE status = 'duplicate'") === 0 && (int)DB::val("SELECT COUNT(*) FROM signals WHERE status = 'new'") === 2, 'повторный сигнал по монете не отбрасывается по времени — в очередь; открыта ли позиция, решает воркер');
     \App\Web\Webhook::handle($msg(str_replace('125.7', '118.0', $SIG_SOL), 777001));
     check((int)DB::val("SELECT COUNT(*) FROM signals WHERE status = 'rejected'") === 1, 'стоп с неверной стороны — отклонён');
     \App\Web\Webhook::handle(['channel_post' => ['text' => str_replace('#LINK', '#ETH', $SIG_SOL), 'chat' => ['id' => -1001234, 'type' => 'channel']]]);
