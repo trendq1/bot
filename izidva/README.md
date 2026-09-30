@@ -486,6 +486,21 @@ php bin/backtest.php XRPUSDT --days=730 --folds=6 --strategies=breakout
   **буквально стоять в тексте** (`Signals::verifyAi`), иначе пост отклоняется; затем те же проверки `SignalParser::validate`
   и та же дедупликация. Посты без цифр в ИИ не уходят, лимит — 60 разборов в час (расходы попадают в `ai_usage`, вид `signal_parse`).
   В журнале источник помечается `+ai`. Нужен ключ Anthropic; без него флаг молча ничего не делает.
+### Автоматическое чтение чужих каналов (ридер)
+
+Бот не видит каналы, где он не админ, поэтому для **полностью автоматической** работы нужен отдельный аккаунт Telegram,
+подписанный на каналы, и скрипт `tools/signal_reader/reader.py` (Python 3 + Telethon). Он шлёт каждый новый пост канала на
+`/tg/signal-ingest.php`, дальше всё как обычно (разбор по настройкам канала → очередь → исполнение демоном).
+
+1. **Отдельный номер/аккаунт** (не основной: автоматизация пользовательского аккаунта — серая зона правил Telegram). Подпишитесь им на нужные каналы.
+2. На https://my.telegram.org → *API development tools* получите `API_ID` и `API_HASH`.
+3. На сервере: `cd tools/signal_reader && pip3 install -r requirements.txt && cp reader.env.example reader.env && chmod 600 reader.env`,
+   заполните `reader.env` (адрес и токен — в админке «Сигналы» → «Внешний ридер»).
+4. `python3 reader.py --login` — один раз, вход по телефону и коду. `python3 reader.py --list` — id ваших каналов → впишите в `CHANNELS`.
+5. Службой: скопируйте `izidva-signal-reader.service` в `/etc/systemd/system/`, поправьте пути/пользователя, затем
+   `systemctl enable --now izidva-signal-reader`. Логи: `journalctl -u izidva-signal-reader -f`.
+6. Первый пост из нового канала создаст его в «Сигналах» **выключенным** — включите канал и проверьте разбор на примерах.
+
 - **Журнал сигналов** — последние 40 записей с итогом по клиентам.
 
 ## Сигналы из Telegram-канала

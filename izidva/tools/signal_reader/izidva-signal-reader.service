@@ -1,0 +1,14 @@
+[Unit]
+Description=IZIDVA Telegram signal reader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/home/admin/web/izidva.com/public_html/tools/signal_reader
+ExecStart=/usr/bin/python3 reader.py
+Restart=always
+RestartSec=10
+User=admin
+
+[Install]
+WantedBy=multi-user.target
