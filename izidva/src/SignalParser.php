@@ -15,7 +15,7 @@ final class SignalParser
         'long_words' => 'лонг,long',
         'short_words' => 'шорт,short',
         'entry_words' => 'диапазон,вход',
-        'target_words' => 'закрыть,тейк,цель,tp',
+        'target_words' => 'закрыть,тейк,цель,цели,tp',
         'stop_words' => 'стоп лосс,stop loss,sl',
         'close_words' => 'закрываем,закрыть все,закрыть сделку,закрываю,закрыта,close',
         'be_words' => 'безубыток,безубытку,б/у,breakeven,break even',
@@ -51,6 +51,15 @@ final class SignalParser
                 || preg_match('/#\s*([A-Za-z0-9]{2,15})(?![A-Za-z0-9])/u', $text, $m)) {
                 return strtoupper($m[1]) . 'USDT';
             }
+            // «LDO LONG» / «ARB ШОРТ»: заглавная монета, за которой сразу идёт слово направления
+            $side = '(?:' . self::alt($cfg, 'long_words') . '|' . self::alt($cfg, 'short_words') . ')';
+            if (preg_match_all('/(?<![A-Za-z0-9])([A-Z][A-Z0-9]{1,14})[ \t]+' . $side . '(?![\p{L}\p{N}])/iu', $text, $mm)) {
+                foreach ($mm[1] as $c) {
+                    if ($c === strtoupper($c) && !in_array($c, ['BUY', 'SELL', 'GO', 'TRADE', 'SIGNAL', 'ENTER', 'OPEN', 'MARKET', 'NEW'], true)) {
+                        return $c . 'USDT';
+                    }
+                }
+            }
             return null;
         }
         return preg_match('/#\s*([A-Z0-9]{2,15})\s*\/\s*USDT/iu', $text, $m) ? strtoupper($m[1]) . 'USDT' : null;
@@ -78,16 +87,23 @@ final class SignalParser
         }
         $side = $hasLong ? 'Buy' : 'Sell';
         // вход — диапазон «$a - $b» или одна цена «$a» (тогда зона входа схлопывается в точку)
-        if (!preg_match('/' . self::alt($cfg, 'entry_words') . '\w*\s*\$?\s*(\d+(?:[.,]\d+)?)(?:\s*[-–—]\s*\$?\s*(\d+(?:[.,]\d+)?))?/iu', $text, $m)) {
+        if (!preg_match('/' . self::alt($cfg, 'entry_words') . '\w*[\s:=\-–—]*\$?\s*(\d+(?:[.,]\d+)?)(?:\s*[-–—]\s*\$?\s*(\d+(?:[.,]\d+)?))?/iu', $text, $m)) {
             return null;
         }
         $a = $num($m[1]);
         $hi = isset($m[2]) && $m[2] !== '' ? $num($m[2]) : $a;
-        if (!preg_match('/' . $b . self::alt($cfg, 'stop_words') . '\s*:?\s*\$?\s*(\d+(?:[.,]\d+)?)/iu', $text, $sm)) {
+        if (!preg_match('/' . $b . self::alt($cfg, 'stop_words') . '[\s:=\-–—]*\$?\s*(\d+(?:[.,]\d+)?)/iu', $text, $sm)) {
             return null;
         }
-        preg_match_all('/' . $b . self::alt($cfg, 'target_words') . '\w*\s*(?:по)?\s*:?\s*\$?\s*(\d+(?:[.,]\d+)?)/iu', $text, $tm);
-        $targets = array_map($num, $tm[1] ?? []);
+        // после слова цели — одна цена или список «a, b, c» («цели - 0.49, 0.50, 0.52»)
+        preg_match_all('/' . $b . self::alt($cfg, 'target_words') . '\w*[\s:=\-–—]*(?:по)?[\s:=\-–—]*((?:\$?\d+(?:[.,]\d+)?\$?(?:[ \t]*[;,][ \t]+|[ \t]*;[ \t]*|[ \t]+(?=\$?\d))?)+)/iu', $text, $tm);
+        $targets = [];
+        foreach ($tm[1] ?? [] as $chunk) {
+            preg_match_all('/\d+(?:[.,]\d+)?/', $chunk, $nm);
+            foreach ($nm[0] as $n) {
+                $targets[] = $num($n);
+            }
+        }
         $leverage = preg_match('/[xх]\s*(\d{1,3})\b/iu', $text, $lm) ? (int)$lm[1] : null;
         return ['symbol' => $symbol, 'side' => $side, 'entry_lo' => min($a, $hi), 'entry_hi' => max($a, $hi),
             'stop' => $num($sm[1]), 'targets' => array_values($targets), 'leverage' => $leverage];
