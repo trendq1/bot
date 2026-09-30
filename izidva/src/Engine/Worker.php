@@ -443,6 +443,19 @@ final class Worker
         return true;
     }
 
+    /** Монета вне списка клиента: подгрузить инструмент и цену, а демо-бирже сразу передать цену (иначе у неё её нет до следующего такта). */
+    private function ensureMarket(string $sym): bool
+    {
+        if (!$this->market->ensureSymbol($sym)) {
+            return false;
+        }
+        $price = (float)($this->market->feeds[$sym]->price ?? 0);
+        if ($price > 0 && $this->ex instanceof PaperExchange) {
+            $this->ex->updatePrices([$sym => $price]);
+        }
+        return true;
+    }
+
     private function moveStopToBreakeven(string $sym): void
     {
         $d = $this->directional[$sym];
@@ -699,7 +712,7 @@ final class Worker
         if ($this->now() < ($this->strategyPausedUntil['signal'] ?? 0)) {
             return $skip('сигналы на паузе после просадки');
         }
-        if (!$this->market->ensureSymbol($sym)) {
+        if (!$this->ensureMarket($sym)) {
             return $skip("монета $sym не найдена на Bybit");
         }
         if (isset($this->grids[$sym]) || isset($this->directional[$sym]) || isset($this->pendingManual[$sym]) || isset($this->ex->positions()[$sym])) {
@@ -849,7 +862,7 @@ final class Worker
         if (!$pos) {
             throw new \RuntimeException("по $sym нет открытой позиции");
         }
-        if (!$this->market->ensureSymbol($sym)) {
+        if (!$this->ensureMarket($sym)) {
             throw new \RuntimeException("не удалось получить данные по $sym");
         }
         $inst = $this->market->instruments[$sym];
@@ -907,7 +920,7 @@ final class Worker
         $sym = (string)$o['symbol'];
         // Ручные сделки не ограничены символами автостратегий клиента — агент их не анализирует, трейдер
         // выбирает монету сам; Market лениво подгружает инструмент+цену для любой реальной монеты Bybit.
-        if (!$this->market->ensureSymbol($sym)) {
+        if (!$this->ensureMarket($sym)) {
             throw new \RuntimeException("монета $sym не найдена на Bybit (фьючерсы) или сейчас недоступна");
         }
         if (isset($this->grids[$sym]) || isset($this->directional[$sym]) || isset($this->pendingManual[$sym])) {

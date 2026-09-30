@@ -1646,6 +1646,17 @@ test('сигнал: первая цель сработала — стоп пер
     $w->step(1015.0);
     check(!isset($w->directional['SOLUSDT']) && empty($ex->orders['SOLUSDT']), 'позиция закрыта, лишние ордера лестницы сняты');
 });
+test('сигнал по монете вне списка клиента: демо-бирже передаётся цена, вход не падает', function () use ($sigSetup, $solSignal) {
+    [$w, $ex, $market] = $sigSetup(121.0);
+    $ex2 = new PaperExchange(1000);                             // цены по SOL у демо-биржи ещё нет, как у монеты вне списка клиента
+    $w2 = new Worker(831, $ex2, $market, new Brain(new Learner(false)), Risk::profile('balanced'), ['BTCUSDT'],
+        ['grid' => true, 'trend' => true, 'liquidation' => true], function ($u, $t) {}, function ($u, $m) {}, function ($u, $e) {});
+    $market->feeds['SOLUSDT']->price = 0.0;
+    $w2->step(1000.0);
+    $market->feeds['SOLUSDT']->price = 121.0;
+    $r = $w2->signalOrder($solSignal, 0.3);
+    check($r['status'] === 'opened' && isset($ex2->positions()['SOLUSDT']), 'позиция открыта: ' . $r['detail']);
+});
 test('сигнал: цена ушла от зоны — пропуск; рядом с зоной — лимит; цель уже взята — пропуск; дубль позиции — пропуск', function () use ($sigSetup, $solSignal) {
     [$w, $ex] = $sigSetup(118.0);                               // ниже зоны на 2% и выше первой цели 119.4? нет — ниже неё
     check($w->signalOrder($solSignal, 0.3)['status'] === 'skipped', 'цена уже за первой целью — пропуск');
