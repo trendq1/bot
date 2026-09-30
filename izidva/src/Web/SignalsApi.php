@@ -74,7 +74,7 @@ final class SignalsApi
         if ($upd !== null) {
             return ['type' => 'update', 'ok' => true, 'error' => null, 'update' => $upd];
         }
-        if (!empty($cfg['ai'])) {
+        if ((int)($cfg['ai'] ?? 1) !== 0) {
             $ai = Signals::aiParse($text);
             if ($ai && isset($ai['signal'])) {
                 $err = SignalParser::validate($ai['signal']);
@@ -102,8 +102,8 @@ final class SignalsApi
                 $out[$k] = mb_substr($v, 0, 300);
             }
         }
-        if (!empty($raw['ai'])) {
-            $out['ai'] = 1;
+        if (array_key_exists('ai', $raw) && empty($raw['ai'])) {
+            $out['ai'] = 0;                                       // ИИ-разбор по умолчанию включён; храним только явное отключение
         }
         if (in_array($raw['symbol_style'] ?? '', ['hash', 'any'], true) && $raw['symbol_style'] !== 'hash') {
             $out['symbol_style'] = 'any';

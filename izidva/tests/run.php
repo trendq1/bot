@@ -1592,7 +1592,8 @@ test('SignalParser: разбор реальных сообщений канал�
     $one = SignalParser::parse("СИГНАЛ #PENGU/USDT\n\n🔑 Открыть ШОРТ в диапазоне \$0.01008 с плечом X25\n\n🍒 Цели:\n\n🔘 Закрыть по \$0.00988\n🔘 Закрыть по \$0.00984\n🔘 Закрыть по \$0.00975\n\n❗️ СТОП ЛОСС: \$0.01040");
     check($one && near($one['entry_lo'], 0.01008) && near($one['entry_hi'], 0.01008) && count($one['targets']) === 3 && SignalParser::validate($one) === null,
         'вход одной ценой (без диапазона) тоже принимается — зона схлопывается в точку');
-    check(SignalParser::parse(str_replace('СТОП ЛОСС', 'СТОП', $SIG_SOL)) === null, 'без стоп-лосса — не сигнал (не открываем без защиты)');
+    check(SignalParser::parse(str_replace('СТОП ЛОСС: $125.7', '', $SIG_SOL)) === null, 'без стоп-лосса — не сигнал (не открываем без защиты)');
+    check(SignalParser::parse(str_replace('СТОП ЛОСС', 'СТОП', $SIG_SOL)) !== null, 'слово «стоп» без «лосс» тоже понимается');
     $lng = SignalParser::parse(str_replace(['ШОРТ', '120.4', '121.7', '125.7'], ['ЛОНГ', '119.0', '119.5', '115.0'], $SIG_SOL));
     check($lng && $lng['side'] === 'Buy' && SignalParser::validate($lng) !== null, 'лонг со стопом выше входа и целями вниз — ошибка проверки');
     $bad = $p;
@@ -1724,10 +1725,10 @@ test('Webhook: сигнал принимается только от разре�
 echo "Меню «Сигналы»: каналы, админы, примеры\n";
 test('SignalParser: слова канала настраиваются; обновления (закрыть / безубыток); неясное не исполняется', function () {
     $en = "#AVAX/USDT\nGo LONG entry zone 39.8 - 40.2\nTP1 41\nTP2 42\nSL 38.5";
-    check(SignalParser::parse($en) === null, 'английский пост со словами «zone»/«Go LONG» по умолчанию не разбирается (нет «диапазон/вход»)');
+    check(SignalParser::parse($en) !== null, 'английский пост (entry zone / TP1 / SL) разбирается уже по умолчанию');
     $p = SignalParser::parse($en, ['entry_words' => 'entry zone']);
     check($p && $p['symbol'] === 'AVAXUSDT' && $p['side'] === 'Buy' && near($p['entry_lo'], 39.8) && count($p['targets']) === 2 && near($p['stop'], 38.5), 'после настройки entry_words пост разобран (TP и SL — слова по умолчанию)');
-    check(SignalParser::findSymbol('AVAXUSDT long') === null && SignalParser::findSymbol('AVAXUSDT long', ['symbol_style' => 'any']) === 'AVAXUSDT', 'стиль монеты any понимает AVAXUSDT без #');
+    check(SignalParser::findSymbol('AVAXUSDT long', ['symbol_style' => 'hash']) === null && SignalParser::findSymbol('AVAXUSDT long') === 'AVAXUSDT', 'по умолчанию монета понимается и без # (AVAXUSDT); строгий режим hash требует #COIN/USDT');
     check(SignalParser::findSymbol('вход #PENGU лонг', ['symbol_style' => 'any']) === 'PENGUUSDT', '#COIN без /USDT в режиме any');
     check(SignalParser::parseUpdate('#AVAX/USDT Закрываем сделку по рынку') === ['symbol' => 'AVAXUSDT', 'action' => 'close'], 'обновление: закрыть');
     check(SignalParser::parseUpdate('#AVAX/USDT Переносим стоп в безубыток') === ['symbol' => 'AVAXUSDT', 'action' => 'breakeven'], 'обновление: безубыток');
@@ -1739,7 +1740,7 @@ test('SignalParser: слова канала настраиваются; обно
 test('SignalParser: формат «LDO LONG / цена входа - a-b / цели - a, b, c / стоп - x» (тире вместо двоеточий, список целей)', function () {
     $cfg = ['symbol_style' => 'any', 'stop_words' => 'стоп'];   // как в настройках канала: слово «стоп» без «лосс»
     $post = "❗️ СИГНАЛ\n\n💭 LDO LONG 📈\n\nплечо - 25 кросс\nцена входа - 0.4871-0.4783$\nцели - 0.4930, 0.5037, 0.5281\nстоп - 0.4553";
-    check(SignalParser::parse($post) === null, 'без стиля «any» монета «LDO LONG» не берётся (строгий режим)');
+    check(SignalParser::parse($post, ['symbol_style' => 'hash']) === null, 'в строгом режиме hash монета «LDO LONG» не берётся');
     $p = SignalParser::parse($post, $cfg);
     check($p && $p['symbol'] === 'LDOUSDT' && $p['side'] === 'Buy' && near($p['entry_lo'], 0.4783) && near($p['entry_hi'], 0.4871) && near($p['stop'], 0.4553), 'монета, сторона, обращённый диапазон входа, стоп после тире');
     check($p && count($p['targets']) === 3 && near($p['targets'][2], 0.5281) && SignalParser::validate($p) === null, 'три цели списком через запятую, сигнал проходит проверки');
@@ -1775,6 +1776,25 @@ test('сигнал «вход по рынку»: #LDO SHORT / Диапазон �
     check($r['status'] === 'opened' && isset($ex->positions()['SOLUSDT']) && str_contains($r['detail'], 'по рынку'), 'вход по рынку по текущей цене: ' . $r['detail']);
     [$w2] = $sigSetup(121.0);
     check($w2->signalOrder(['stop' => 150.0] + $sig, 0.3)['status'] === 'skipped', 'стоп дальше 15% от текущей цены при входе по рынку — пропуск');
+});
+
+test('SignalParser: «любой» формат — русский/английский, #COIN, COINUSDT, $COIN, TP1/TP2, диапазоны «от…до», вход по рынку, направление по стопу', function () {
+    $cases = [
+        ["BTCUSDT LONG\nEntry: 62000-62500\nTP1: 63000\nTP2: 64000\nTP3: 65000\nSL: 61000", 'BTCUSDT', 'Buy', 62000.0, [63000.0, 64000.0, 65000.0], 61000.0],
+        ["\$ETH Buy от 3000 до 3010\nTarget 1 - 3100\nTarget 2 - 3200\nStop loss 2950", 'ETHUSDT', 'Buy', 3000.0, [3100.0, 3200.0], 2950.0],
+        ["ETH/USDT\nВход 3000\nТейк профит 3100, 3200\nСтоп 2950", 'ETHUSDT', 'Buy', 3000.0, [3100.0, 3200.0], 2950.0],
+        ["Монета: SOL\nВход: 120\nЦели: 118, 116\nСтоп: 123", 'SOLUSDT', 'Sell', 120.0, [118.0, 116.0], 123.0],
+        ["#XRP/USDT вход 0.5 тп 0.52 0.54 стоп 0.48", 'XRPUSDT', 'Buy', 0.5, [0.52, 0.54], 0.48],
+        ["🚀 APE SHORT x25 ➡ Вход: по рынку ✅ Тейки: 0.1523 0.1507 0.1416 ❌ Стоп: 0.1618", 'APEUSDT', 'Sell', 0.0, [0.1523, 0.1507, 0.1416], 0.1618],
+    ];
+    foreach ($cases as [$text, $sym, $side, $lo, $targets, $stop]) {
+        $p = SignalParser::parse($text);
+        check($p && $p['symbol'] === $sym && $p['side'] === $side && near($p['entry_lo'], $lo) && $p['targets'] === $targets && near($p['stop'], $stop)
+            && SignalParser::validate($p) === null, 'разобран: ' . str_replace("\n", ' / ', mb_substr($text, 0, 50)));
+    }
+    check(SignalParser::missing("#SOL лонг вход 120 цели 125 130") === ['стоп-лосс'], 'подсказка «чего не хватает»: нет стопа');
+    check(SignalParser::missing('Всем привет') === ['монета', 'направление (лонг/шорт)', 'вход (цена, диапазон или «по рынку»)', 'стоп-лосс', 'цели (тейк-профит)'], 'подсказка для не-сигнала');
+    check(SignalParser::findSymbol('#signal #crypto #ARB лонг') === 'ARBUSDT', 'служебные хэштеги (#signal, #crypto) монетой не считаются');
 });
 
 test('Signals::fromTelegram: админ из таблицы, пересылка из нового канала создаёт выключенный канал, ручной источник', function () {
@@ -1821,14 +1841,14 @@ test('ИИ-разбор сигнала: числа обязаны быть в т
     check($calls === 1 && $r && isset($r['signal']), 'пост с цифрами уходит в ИИ');
     // через канал с включённым ai: строгий разбор не подошёл → ИИ
     $ch = \App\Signals::ensureChannel('ext:aitest', 'AI test', true, 'test');
-    DB::update('signal_channels', ['parser_config' => json_encode(['ai' => 1])], 'id = :i', [':i' => $ch['id']]);
+    DB::update('signal_channels', ['parser_config' => json_encode(new \stdClass())], 'id = :i', [':i' => $ch['id']]);
     $ch = \App\Signals::channelByKey('ext:aitest');
     $res = \App\Signals::receive($ch, $post, null);
-    check($res['status'] === 'new' && str_ends_with((string)DB::val('SELECT source FROM signals WHERE id = ?', [$res['id']]), '+ai'), 'канал с ai=1: пост принят через ИИ, источник помечен +ai');
-    DB::update('signal_channels', ['parser_config' => json_encode(new \stdClass())], 'id = :i', [':i' => $ch['id']]);
+    check($res['status'] === 'new' && str_ends_with((string)DB::val('SELECT source FROM signals WHERE id = ?', [$res['id']]), '+ai'), 'ИИ-разбор включён по умолчанию: пост принят через ИИ, источник помечен +ai');
+    DB::update('signal_channels', ['parser_config' => json_encode(['ai' => 0])], 'id = :i', [':i' => $ch['id']]);
     $calls = 0;
     $res = \App\Signals::receive(\App\Signals::channelByKey('ext:aitest'), $post . ' ', null);
-    check($res['status'] === 'ignored' && $calls === 0, 'без флага ai ИИ не вызывается — работают только жёсткие правила');
+    check($res['status'] === 'ignored' && $calls === 0, 'при ai=0 ИИ не вызывается — работают только правила');
     \App\Signals::$aiExtractor = null;
     check(\App\Signals::aiParse($post) === null, 'без ключа Anthropic ИИ-разбор молча не применяется');
     DB::q("DELETE FROM signals WHERE channel_id = ?", [$ch['id']]);
@@ -1902,7 +1922,7 @@ test('SignalsApi: обзор с бейджами примеров, сохран�
     $a = $h('POST', '/signals/parse', ['text' => $good, 'channel_id' => $cid]);
     check($a['type'] === 'signal' && $a['ok'] && $a['signal']['symbol'] === 'DOTUSDT', 'playground: разбор настройками канала');
     $a = $h('POST', '/signals/parse', ['text' => $good, 'parser' => []]);
-    check($a['type'] === 'none', 'playground: с настройками по умолчанию тот же пост не распознан (черновик настроек из формы)');
+    check($a['type'] === 'signal' && $h('POST', '/signals/parse', ['text' => 'Доброе утро, рынок растёт 5%', 'parser' => []])['type'] === 'none', 'playground: черновик настроек из формы; обычная болтовня не распознаётся');
     $ad = $h('POST', '/signals/admins', ['tg_id' => '555123', 'name' => 'Помощник']);
     $threw = false; try { $h('POST', '/signals/admins', ['tg_id' => '555123']); } catch (\App\Web\ApiError) { $threw = true; }
     check($ad['ok'] && $threw, 'админ добавлен, дубль отклонён');

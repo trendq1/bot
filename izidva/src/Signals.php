@@ -147,13 +147,19 @@ final class Signals
         if (!in_array($side, ['Buy', 'Sell'], true)) {
             return null;
         }
+        $market = $vals[0] == 0.0 && $vals[1] == 0.0 && preg_match('/(?:по\s+рынку|рыночн|market|по\s+текущ|сейчас|now)/iu', $text);
+        if ($market) {
+            array_splice($vals, 0, 2);                             // вход по рынку: цены входа в тексте нет
+        }
         foreach ($vals as $v) {
             if ($v <= 0 || !$present($v)) {
                 return ['type' => 'signal', 'error' => 'ИИ вернул число, которого нет в тексте (' . $v . ') — отклонено'];
             }
         }
-        $s = ['symbol' => $symbol, 'side' => $side, 'entry_lo' => min($vals[0], $vals[1]), 'entry_hi' => max($vals[0], $vals[1]),
-            'stop' => $vals[2], 'targets' => $targets, 'leverage' => null];
+        $s = $market
+            ? ['symbol' => $symbol, 'side' => $side, 'entry_lo' => 0.0, 'entry_hi' => 0.0, 'market' => true, 'stop' => $vals[0], 'targets' => $targets, 'leverage' => null]
+            : ['symbol' => $symbol, 'side' => $side, 'entry_lo' => min($vals[0], $vals[1]), 'entry_hi' => max($vals[0], $vals[1]), 'market' => false,
+                'stop' => $vals[2], 'targets' => $targets, 'leverage' => null];
         return ['type' => 'signal', 'signal' => $s];
     }
 
@@ -182,7 +188,7 @@ final class Signals
         $viaAi = false;
         if ($s === null) {
             $u = SignalParser::parseUpdate($text, $cfg);
-            if ($u === null && !empty($cfg['ai'])) {
+            if ($u === null && (int)($cfg['ai'] ?? 1) !== 0) {
                 $ai = self::aiParse($text);
                 if ($ai && isset($ai['signal'])) {
                     $s = $ai['signal'];
@@ -208,11 +214,12 @@ final class Signals
                 $say("📝 Обновление #$id по {$u['symbol']}: " . ($u['action'] === 'close' ? 'закрыть' : 'стоп в безубыток') . '. Применяю к сделкам этого канала.');
                 return ['status' => 'update', 'id' => $id, 'message' => $u['action']];
             }
-            $say('❔ Не распознал сигнал: нужны #МОНЕТА/USDT, ЛОНГ/ШОРТ, диапазон входа, цели и СТОП ЛОСС. Ничего не открыто. '
-                . 'Слова канала настраиваются в админке (меню «Сигналы»).');
+            $miss = SignalParser::missing($text, $cfg);
+            $say('❔ Не распознал сигнал' . ($miss ? ': не нашёл — ' . implode(', ', $miss) : '') . '. Ничего не открыто. '
+                . 'Слова канала можно добавить в админке (меню «Сигналы»).');
             if ($reply) {
                 DB::insert('signals', $base + ['symbol' => '?', 'side' => '', 'entry_lo' => 0, 'entry_hi' => 0, 'stop_loss' => 0, 'targets' => [],
-                    'status' => 'ignored', 'summary' => 'не распознан']);
+                    'status' => 'ignored', 'summary' => 'не распознан' . ($miss ? ': нет — ' . implode(', ', $miss) : '')]);
             }
             return ['status' => 'ignored', 'id' => null, 'message' => 'не распознан'];
         }
