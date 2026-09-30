@@ -27,9 +27,14 @@ final class SignalParser
         $raw = $cfg[$key] ?? '';
         $words = is_array($raw) ? $raw : explode(',', (string)$raw);
         $words = array_values(array_filter(array_map(fn($w) => trim((string)$w), $words), fn($w) => $w !== ''));
-        if (!$words) {
-            $words = explode(',', self::DEFAULTS[$key]);
-        }
+        // слова канала ДОБАВЛЯЮТСЯ к стандартным: опечатка или неполный список не лишают разбор базовых слов
+        $words = array_merge($words, explode(',', self::DEFAULTS[$key]));
+        $seen = [];
+        $words = array_values(array_filter($words, function ($w) use (&$seen) {
+            $k = mb_strtolower(trim($w));
+            return $k !== '' && !isset($seen[$k]) && ($seen[$k] = true);
+        }));
+        usort($words, fn($a, $b) => mb_strlen($b) <=> mb_strlen($a));
         $parts = [];
         foreach ($words as $w) {
             $parts[] = implode('[\s\-]*', array_map(fn($x) => preg_quote($x, '/'), preg_split('/[\s\-]+/u', $w, -1, PREG_SPLIT_NO_EMPTY) ?: [$w]));
@@ -123,6 +128,11 @@ final class SignalParser
         }
         $b = '(?<![\p{L}\p{N}])';
         $e = '(?![\p{L}\p{N}])';
+        // пост со входом или стоп-лоссом — это (возможно, сломанный) сигнал, а не команда: не закрываем чужую сделку по ошибке
+        if (preg_match('/' . $b . self::alt($cfg, 'stop_words') . '[\s:=\-–—]*\$?\s*\d/iu', $text)
+            || preg_match('/' . self::alt($cfg, 'entry_words') . '\w*[\s:=\-–—]*\$?\s*\d/iu', $text)) {
+            return null;
+        }
         $close = (bool)preg_match('/' . $b . self::alt($cfg, 'close_words') . $e . '/iu', $text);
         $be = (bool)preg_match('/' . $b . self::alt($cfg, 'be_words') . '/iu', $text);
         if ($close === $be) {

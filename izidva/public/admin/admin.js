@@ -639,7 +639,7 @@ VIEWS.signals = async () => {
       <label class="row" style="gap:8px;align-self:end"><input type="checkbox" id="cEn" style="width:auto" ${c.enabled ? "checked" : ""}> Канал включён</label></div>
       <label>Заметка<input class="inp" id="cNotes" value="${esc(c.notes)}"></label>
       <h3 style="margin-top:14px">Как разбирать посты этого канала</h3>
-      <div class="muted small">Слова через запятую. Пусто — по умолчанию. Регистр не важен, пробел и дефис внутри слова необязательны.</div>
+      <div class="muted small">Слова через запятую. Ваши слова ДОБАВЛЯЮТСЯ к стандартным (серые подсказки в полях) — стандартные работают всегда. Регистр не важен, пробел и дефис внутри слова необязательны.</div>
       <div class="grid2">${PARSER_FIELDS.map(([k, l]) => `<label>${l}<input class="inp" data-pf="${k}" value="${esc(p[k] || "")}" placeholder="${esc(d.defaults[k])}"></label>`).join("")}
       <label>Как записана монета<select id="cStyle"><option value="hash" ${p.symbol_style !== "any" ? "selected" : ""}>#COIN/USDT (строго)</option><option value="any" ${p.symbol_style === "any" ? "selected" : ""}>любая: COINUSDT, COIN/USDT, #COIN</option></select></label></div>
       <label class="row" style="gap:8px;margin-top:10px"><input type="checkbox" id="cAi" style="width:auto" ${p.ai ? "checked" : ""}> <b>ИИ-разбор, если шаблон не подошёл</b></label>

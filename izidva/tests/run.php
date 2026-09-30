@@ -1748,6 +1748,16 @@ test('SignalParser: формат «LDO LONG / цена входа - a-b / цел
     check(SignalParser::findSymbol('BUY LONG сейчас', ['symbol_style' => 'any']) === null, 'служебное слово BUY монетой не считается');
 });
 
+test('SignalParser: слова канала добавляются к стандартным (опечатка не ломает); сломанный сигнал не становится командой «закрыть»', function () {
+    $cfg = ['symbol_style' => 'any', 'entry_words' => 'Диапозон, диапозоне', 'target_words' => 'Цели, профит', 'close_words' => 'закрыть по, закрыть', 'stop_words' => 'СТОП ЛОСС, стоп'];
+    $post = "СИГНАЛ #PENGU/USDT\n\n🔑 Открыть ШОРТ в диапазоне \$0.00997 - \$0.01008 с плечом X25\n\n🍒 Цели:\n\n🔘 Закрыть по \$0.00989\n🔘 Закрыть по \$0.00985\n\n❗️ СТОП ЛОСС: \$0.01041";
+    $p = SignalParser::parse($post, $cfg);
+    check($p && $p['symbol'] === 'PENGUUSDT' && $p['side'] === 'Sell' && count($p['targets']) === 2 && SignalParser::validate($p) === null, 'опечатка «Диапозон» в настройках не мешает: стандартное «диапазон» остаётся');
+    $broken = str_replace('в диапазоне $0.00997 - $0.01008', 'в зоне', $post);
+    check(SignalParser::parse($broken, $cfg) === null && SignalParser::parseUpdate($broken, $cfg) === null, 'пост без входа — не сигнал и НЕ команда «закрыть» (в нём есть «Закрыть по» и стоп)');
+    check(SignalParser::parseUpdate('#PENGU/USDT закрыть по рынку', $cfg) === ['symbol' => 'PENGUUSDT', 'action' => 'close'], 'короткое «закрыть по рынку» как обновление работает');
+});
+
 test('Signals::fromTelegram: админ из таблицы, пересылка из нового канала создаёт выключенный канал, ручной источник', function () {
     Settings::save(['signal_enabled' => true, 'signal_allowed_ids' => []]);
     DB::q('DELETE FROM signal_channels'); DB::q('DELETE FROM signal_admins'); DB::q("DELETE FROM signals WHERE symbol = 'AVAXUSDT'");
