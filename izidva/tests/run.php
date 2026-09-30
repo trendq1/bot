@@ -1758,6 +1758,25 @@ test('SignalParser: слова канала добавляются к станд
     check(SignalParser::parseUpdate('#PENGU/USDT закрыть по рынку', $cfg) === ['symbol' => 'PENGUUSDT', 'action' => 'close'], 'короткое «закрыть по рынку» как обновление работает');
 });
 
+test('сигнал «вход по рынку»: #LDO SHORT / Диапазон входа: по рынку / Тейки a / b / c / Стоп', function () use ($sigSetup) {
+    $post = "#LDO SHORT\n\nПлечо: 25–30х 🛢\n\n🔹 Диапазон входа: по рынку\n🔹 Тейки: 0.4583 / 0.4510 / 0.4427\n🔹 Стоп: 0.4888\n\nВходим на 100\$\n🏦 Банк: 963.38\$";
+    $cfg = ['symbol_style' => 'any', 'stop_words' => 'стоп'];
+    $p = SignalParser::parse($post, $cfg);
+    check($p && $p['symbol'] === 'LDOUSDT' && $p['side'] === 'Sell' && $p['market'] === true && $p['entry_lo'] == 0 && near($p['stop'], 0.4888)
+        && $p['targets'] === [0.4583, 0.451, 0.4427], 'монета #LDO, шорт, вход по рынку, три цели через « / », стоп');
+    check(SignalParser::validate($p) === null, 'проверка: стоп выше целей, цели вниз — корректно');
+    $bad = $p; $bad['stop'] = 0.44;
+    check(SignalParser::validate($bad) !== null, 'стоп ниже целей у шорта — ошибка');
+    check(SignalParser::parse(str_replace('по рынку', 'скоро', $post), $cfg) === null, 'без цены и без «по рынку» — не сигнал');
+    // исполнение: цена берётся текущая
+    [$w, $ex, $market] = $sigSetup(121.0);
+    $sig = ['id' => 1, 'symbol' => 'SOLUSDT', 'side' => 'Sell', 'entry_lo' => 0.0, 'entry_hi' => 0.0, 'stop' => 125.7, 'targets' => [119.4, 118.9]];
+    $r = $w->signalOrder($sig, 0.3);
+    check($r['status'] === 'opened' && isset($ex->positions()['SOLUSDT']) && str_contains($r['detail'], 'по рынку'), 'вход по рынку по текущей цене: ' . $r['detail']);
+    [$w2] = $sigSetup(121.0);
+    check($w2->signalOrder(['stop' => 150.0] + $sig, 0.3)['status'] === 'skipped', 'стоп дальше 15% от текущей цены при входе по рынку — пропуск');
+});
+
 test('Signals::fromTelegram: админ из таблицы, пересылка из нового канала создаёт выключенный канал, ручной источник', function () {
     Settings::save(['signal_enabled' => true, 'signal_allowed_ids' => []]);
     DB::q('DELETE FROM signal_channels'); DB::q('DELETE FROM signal_admins'); DB::q("DELETE FROM signals WHERE symbol = 'AVAXUSDT'");

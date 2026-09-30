@@ -727,6 +727,13 @@ final class Worker
         $cid = isset($sig['channel_id']) ? (int)$sig['channel_id'] : null;
         $long = $sig['side'] === 'Buy';
         [$lo, $hi, $stop] = [(float)$sig['entry_lo'], (float)$sig['entry_hi'], (float)$sig['stop']];
+        $marketEntry = $lo <= 0 && $hi <= 0;                  // «вход по рынку»: цены входа в сигнале нет
+        if ($marketEntry) {
+            $lo = $hi = $price;
+            if (abs($price - $stop) / $price > 0.15) {
+                return $skip('стоп дальше 15% от текущей цены — похоже на ошибку в сообщении');
+            }
+        }
         $targets = array_map('floatval', $sig['targets']);
         if ($long ? $price >= $targets[0] : $price <= $targets[0]) {
             return $skip('цена уже достигла первой цели');

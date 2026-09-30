@@ -91,9 +91,15 @@ final class SignalParser
             $hasLong = preg_match('/^' . self::alt($cfg, 'long_words') . '$/iu', $fm[1] ?? '');
         }
         $side = $hasLong ? 'Buy' : 'Sell';
-        // вход — диапазон «$a - $b» или одна цена «$a» (тогда зона входа схлопывается в точку)
-        if (!preg_match('/' . self::alt($cfg, 'entry_words') . '\w*[\s:=\-–—]*\$?\s*(\d+(?:[.,]\d+)?)(?:\s*[-–—]\s*\$?\s*(\d+(?:[.,]\d+)?))?/iu', $text, $m)) {
-            return null;
+        // вход — диапазон «$a - $b», одна цена «$a» (зона схлопывается в точку) или «по рынку» (цена не указана — берём текущую при исполнении)
+        $entry = self::alt($cfg, 'entry_words') . '\w*(?:[\s\-]+(?:входа|вход|цены|цена|entry))?';
+        $market = false;
+        if (!preg_match('/' . $entry . '[\s:=\-–—]*\$?\s*(\d+(?:[.,]\d+)?)(?:\s*[-–—]\s*\$?\s*(\d+(?:[.,]\d+)?))?/iu', $text, $m)) {
+            if (!preg_match('/' . $entry . '[^\n\d]{0,25}?(?:по\s+рынку|рыночн\w*|по\s+текущей|market)/iu', $text)) {
+                return null;
+            }
+            $market = true;
+            $m = [1 => '0', 2 => ''];
         }
         $a = $num($m[1]);
         $hi = isset($m[2]) && $m[2] !== '' ? $num($m[2]) : $a;
@@ -101,7 +107,7 @@ final class SignalParser
             return null;
         }
         // после слова цели — одна цена или список «a, b, c» («цели - 0.49, 0.50, 0.52»)
-        preg_match_all('/' . $b . self::alt($cfg, 'target_words') . '\w*[\s:=\-–—]*(?:по)?[\s:=\-–—]*((?:\$?\d+(?:[.,]\d+)?\$?(?:[ \t]*[;,][ \t]+|[ \t]*;[ \t]*|[ \t]+(?=\$?\d))?)+)/iu', $text, $tm);
+        preg_match_all('/' . $b . self::alt($cfg, 'target_words') . '\w*[\s:=\-–—]*(?:по)?[\s:=\-–—]*((?:\$?\d+(?:[.,]\d+)?\$?(?:[ \t]*[;,\/][ \t]+|[ \t]*;[ \t]*|[ \t]+(?=\$?\d))?)+)/iu', $text, $tm);
         $targets = [];
         foreach ($tm[1] ?? [] as $chunk) {
             preg_match_all('/\d+(?:[.,]\d+)?/', $chunk, $nm);
@@ -110,7 +116,7 @@ final class SignalParser
             }
         }
         $leverage = preg_match('/[xх]\s*(\d{1,3})\b/iu', $text, $lm) ? (int)$lm[1] : null;
-        return ['symbol' => $symbol, 'side' => $side, 'entry_lo' => min($a, $hi), 'entry_hi' => max($a, $hi),
+        return ['symbol' => $symbol, 'side' => $side, 'entry_lo' => min($a, $hi), 'entry_hi' => max($a, $hi), 'market' => $market,
             'stop' => $num($sm[1]), 'targets' => array_values($targets), 'leverage' => $leverage];
     }
 
@@ -148,6 +154,19 @@ final class SignalParser
     public static function validate(array $s): ?string
     {
         $long = $s['side'] === 'Buy';
+        if ($s['entry_lo'] <= 0 && $s['entry_hi'] <= 0) {            // вход по рынку: цены входа нет, проверяем стоп и цели между собой
+            if ($s['stop'] <= 0 || !$s['targets']) {
+                return 'нет стопа или целей';
+            }
+            $prev = $s['stop'];
+            foreach ($s['targets'] as $t) {
+                if ($long ? $t <= $prev : $t >= $prev) {
+                    return 'стоп и цели расположены не по порядку (стоп → цели в сторону прибыли)';
+                }
+                $prev = $t;
+            }
+            return null;
+        }
         $mid = ($s['entry_lo'] + $s['entry_hi']) / 2;
         if ($s['entry_lo'] <= 0 || $s['stop'] <= 0 || !$s['targets']) {
             return 'нет цены входа, стопа или целей';

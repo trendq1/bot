@@ -541,7 +541,7 @@ VIEWS.signals = async () => {
     if (r.type === "signal") {
       const s = r.signal;
       return `<div class="note ${r.ok ? "" : "err"}"><b>${r.ok ? "✅ Сигнал распознан" : "⚠️ Распознан, но не пройдёт проверку"}${r.via === "ai" ? " (ИИ)" : ""}</b>${r.error ? ": " + esc(r.error) : ""}<br>
-        ${esc(s.symbol)} · ${s.side === "Buy" ? "LONG" : "SHORT"} · вход ${s.entry_lo}–${s.entry_hi} · стоп ${s.stop} · цели: ${s.targets.map(esc).join(", ") || "—"}${s.leverage ? " · плечо канала X" + s.leverage + " (не используется)" : ""}</div>`;
+        ${esc(s.symbol)} · ${s.side === "Buy" ? "LONG" : "SHORT"} · вход ${s.entry_lo > 0 ? s.entry_lo + '–' + s.entry_hi : 'по рынку'} · стоп ${s.stop} · цели: ${s.targets.map(esc).join(", ") || "—"}${s.leverage ? " · плечо канала X" + s.leverage + " (не используется)" : ""}</div>`;
     }
     if (r.type === "update") return `<div class="note"><b>📝 Обновление${r.via === "ai" ? " (ИИ)" : ""}</b>: ${esc(r.update.symbol)} → ${r.update.action === "close" ? "закрыть сделку" : "стоп в безубыток"}</div>`;
     return `<div class="note err"><b>Не распознано</b>: ${esc(r.error)}${r.symbol ? " (монета найдена: " + esc(r.symbol) + ", не хватает остального)" : " (монета не найдена)"}</div>`;

@@ -248,7 +248,7 @@ final class SignalsApi
         $admins = array_map(fn($a) => ['id' => (int)$a['id'], 'tg_id' => (string)$a['tg_id'], 'name' => $a['name'], 'enabled' => (bool)$a['enabled']], DB::all('SELECT * FROM signal_admins ORDER BY id'));
         $names = array_column(DB::all('SELECT id, name FROM signal_channels'), 'name', 'id');
         $recent = array_map(fn($s) => ['id' => (int)$s['id'], 'kind' => $s['kind'], 'action' => $s['action'], 'channel' => $names[$s['channel_id'] ?? 0] ?? '—',
-            'symbol' => $s['symbol'], 'side' => $s['side'], 'entry' => $s['entry_lo'] . '–' . $s['entry_hi'], 'stop' => (float)$s['stop_loss'],
+            'symbol' => $s['symbol'], 'side' => $s['side'], 'entry' => (float)$s['entry_lo'] <= 0 ? 'по рынку' : $s['entry_lo'] . '–' . $s['entry_hi'], 'stop' => (float)$s['stop_loss'],
             'targets' => json_decode((string)$s['targets'], true) ?: [], 'status' => $s['status'], 'summary' => $s['summary'], 'text' => $s['raw_text'],
             'at' => Api::iso($s['created_at'])], DB::all('SELECT * FROM signals ORDER BY id DESC LIMIT 40'));
         return [

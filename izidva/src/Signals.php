@@ -226,7 +226,7 @@ final class Signals
         }
         // Дублей по времени нет: повторный сигнал по монете исполняется, если у клиента нет позиции/ордера по ней (проверяет Worker::signalOrder)
         $id = DB::insert('signals', $row + ['status' => 'new']);
-        $say("📡 Сигнал #$id принят: {$s['symbol']} " . ($s['side'] === 'Buy' ? 'LONG' : 'SHORT') . ", вход {$s['entry_lo']}–{$s['entry_hi']}, стоп {$s['stop']}, целей "
+        $say("📡 Сигнал #$id принят: {$s['symbol']} " . ($s['side'] === 'Buy' ? 'LONG' : 'SHORT') . ", вход " . ((float)$s['entry_lo'] <= 0 ? 'по рынку' : "{$s['entry_lo']}–{$s['entry_hi']}") . ", стоп {$s['stop']}, целей "
             . count($s['targets']) . ". Исполняю клиентам, отчёт пришлю сюда.");
         return ['status' => 'new', 'id' => $id, 'message' => 'принят'];
     }

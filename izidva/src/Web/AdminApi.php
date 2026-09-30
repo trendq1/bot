@@ -450,7 +450,7 @@ final class AdminApi
     private static function signals(): array
     {
         $rows = DB::all('SELECT * FROM signals ORDER BY id DESC LIMIT 30');
-        return array_map(fn($s) => ['id' => (int)$s['id'], 'symbol' => $s['symbol'], 'side' => $s['side'], 'entry' => $s['entry_lo'] . '–' . $s['entry_hi'],
+        return array_map(fn($s) => ['id' => (int)$s['id'], 'symbol' => $s['symbol'], 'side' => $s['side'], 'entry' => (float)$s['entry_lo'] <= 0 ? 'по рынку' : $s['entry_lo'] . '–' . $s['entry_hi'],
             'stop' => (float)$s['stop_loss'], 'targets' => json_decode((string)$s['targets'], true) ?: [], 'status' => $s['status'],
             'summary' => $s['summary'], 'at' => Api::iso($s['created_at'])], $rows);
     }
