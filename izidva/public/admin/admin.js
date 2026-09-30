@@ -540,10 +540,10 @@ VIEWS.signals = async () => {
   const fmtRes = (r) => {
     if (r.type === "signal") {
       const s = r.signal;
-      return `<div class="note ${r.ok ? "" : "err"}"><b>${r.ok ? "✅ Сигнал распознан" : "⚠️ Распознан, но не пройдёт проверку"}</b>${r.error ? ": " + esc(r.error) : ""}<br>
+      return `<div class="note ${r.ok ? "" : "err"}"><b>${r.ok ? "✅ Сигнал распознан" : "⚠️ Распознан, но не пройдёт проверку"}${r.via === "ai" ? " (ИИ)" : ""}</b>${r.error ? ": " + esc(r.error) : ""}<br>
         ${esc(s.symbol)} · ${s.side === "Buy" ? "LONG" : "SHORT"} · вход ${s.entry_lo}–${s.entry_hi} · стоп ${s.stop} · цели: ${s.targets.map(esc).join(", ") || "—"}${s.leverage ? " · плечо канала X" + s.leverage + " (не используется)" : ""}</div>`;
     }
-    if (r.type === "update") return `<div class="note"><b>📝 Обновление</b>: ${esc(r.update.symbol)} → ${r.update.action === "close" ? "закрыть сделку" : "стоп в безубыток"}</div>`;
+    if (r.type === "update") return `<div class="note"><b>📝 Обновление${r.via === "ai" ? " (ИИ)" : ""}</b>: ${esc(r.update.symbol)} → ${r.update.action === "close" ? "закрыть сделку" : "стоп в безубыток"}</div>`;
     return `<div class="note err"><b>Не распознано</b>: ${esc(r.error)}${r.symbol ? " (монета найдена: " + esc(r.symbol) + ", не хватает остального)" : " (монета не найдена)"}</div>`;
   };
   const chLabel = (c) => c.pending ? `<span class="tag warn">ожидает подтверждения</span>` : c.enabled ? `<span class="tag ok">включён</span>` : `<span class="tag">выключен</span>`;
@@ -642,6 +642,8 @@ VIEWS.signals = async () => {
       <div class="muted small">Слова через запятую. Пусто — по умолчанию. Регистр не важен, пробел и дефис внутри слова необязательны.</div>
       <div class="grid2">${PARSER_FIELDS.map(([k, l]) => `<label>${l}<input class="inp" data-pf="${k}" value="${esc(p[k] || "")}" placeholder="${esc(d.defaults[k])}"></label>`).join("")}
       <label>Как записана монета<select id="cStyle"><option value="hash" ${p.symbol_style !== "any" ? "selected" : ""}>#COIN/USDT (строго)</option><option value="any" ${p.symbol_style === "any" ? "selected" : ""}>любая: COINUSDT, COIN/USDT, #COIN</option></select></label></div>
+      <label class="row" style="gap:8px;margin-top:10px"><input type="checkbox" id="cAi" style="width:auto" ${p.ai ? "checked" : ""}> <b>ИИ-разбор, если шаблон не подошёл</b></label>
+      <div class="muted small">Claude переписывает поля из поста; каждое число и монета обязаны буквально стоять в тексте, затем действуют те же проверки (стоп, порядок целей, диапазон). Тратит токены (учитывается в расходах на ИИ), не более 60 постов в час. Нужен ключ Anthropic в настройках.</div>
       <button class="btn primary big" id="cSave" style="margin-top:12px">Сохранить канал</button>
       <h3 style="margin-top:18px">Примеры постов</h3>
       ${isNew ? '<div class="muted small">Сохраните канал — тогда можно добавлять примеры.</div>' : `
@@ -654,7 +656,7 @@ VIEWS.signals = async () => {
       <div style="margin-top:14px"><button class="btn danger" id="cDel">Удалить канал</button></div>`}`;
     $("modal").hidden = false; $("modalBg").hidden = false;
     $("mClose").onclick = closeModal;
-    const parser = () => { const o = { symbol_style: $("cStyle").value }; $("modal").querySelectorAll("[data-pf]").forEach((i) => { if (i.value.trim()) o[i.dataset.pf] = i.value.trim(); }); return o; };
+    const parser = () => { const o = { symbol_style: $("cStyle").value }; if ($("cAi").checked) o.ai = 1; $("modal").querySelectorAll("[data-pf]").forEach((i) => { if (i.value.trim()) o[i.dataset.pf] = i.value.trim(); }); return o; };
     $("cSave").onclick = async () => {
       try {
         const r = await post("/signals/channels", { id: c.id, name: $("cName").value, source_key: $("cKey").value.trim(), enabled: $("cEn").checked, mode: $("cMode").value,

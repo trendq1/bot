@@ -1763,6 +1763,37 @@ test('Signals::fromTelegram: админ из таблицы, пересылка 
     check(\App\Signals::fromTelegram($pm($post, 4242)) === false, 'при выключенном приёме сигналов система молчит');
 });
 
+test('ИИ-разбор сигнала: числа обязаны быть в тексте, монета тоже; те же проверки; без ключа/цифр ИИ не вызывается', function () {
+    $post = "Берём NEAR, лонг от 6.8 до 7.0. Цели 7.2, 7.4. Стоп 6.5";
+    $good = ['type' => 'signal', 'symbol' => 'NEAR', 'side' => 'Buy', 'entry_lo' => 6.8, 'entry_hi' => 7.0, 'stop' => 6.5, 'targets' => [7.2, 7.4], 'action' => 'none'];
+    $v = \App\Signals::verifyAi($good, $post);
+    check($v && $v['type'] === 'signal' && $v['signal']['symbol'] === 'NEARUSDT' && SignalParser::validate($v['signal']) === null, 'честный ответ ИИ принят и проходит validate');
+    $bad = \App\Signals::verifyAi(['stop' => 6.4] + $good, $post);
+    check(isset($bad['error']) && !isset($bad['signal']), 'выдуманный стоп (38.0 нет в тексте) — отклонено');
+    check(\App\Signals::verifyAi(['symbol' => 'DOGE'] + $good, $post) === null, 'монеты нет в тексте — отклонено');
+    check(\App\Signals::verifyAi(['side' => 'none'] + $good, $post) === null && \App\Signals::verifyAi(['type' => 'none'] + $good, $post) === null, 'без направления или type=none — ничего');
+    check(\App\Signals::verifyAi(['type' => 'update', 'symbol' => 'NEAR', 'action' => 'close'], 'NEAR закрываем') === ['type' => 'update', 'update' => ['symbol' => 'NEARUSDT', 'action' => 'close']], 'обновление от ИИ');
+    $calls = 0;
+    \App\Signals::$aiExtractor = function ($t) use (&$calls, $good) { $calls++; return $good; };
+    check(\App\Signals::aiParse('Доброе утро всем!') === null && $calls === 0, 'пост без цифр в ИИ не отправляется');
+    $r = \App\Signals::aiParse($post);
+    check($calls === 1 && $r && isset($r['signal']), 'пост с цифрами уходит в ИИ');
+    // через канал с включённым ai: строгий разбор не подошёл → ИИ
+    $ch = \App\Signals::ensureChannel('ext:aitest', 'AI test', true, 'test');
+    DB::update('signal_channels', ['parser_config' => json_encode(['ai' => 1])], 'id = :i', [':i' => $ch['id']]);
+    $ch = \App\Signals::channelByKey('ext:aitest');
+    $res = \App\Signals::receive($ch, $post, null);
+    check($res['status'] === 'new' && str_ends_with((string)DB::val('SELECT source FROM signals WHERE id = ?', [$res['id']]), '+ai'), 'канал с ai=1: пост принят через ИИ, источник помечен +ai');
+    DB::update('signal_channels', ['parser_config' => json_encode(new \stdClass())], 'id = :i', [':i' => $ch['id']]);
+    $calls = 0;
+    $res = \App\Signals::receive(\App\Signals::channelByKey('ext:aitest'), $post . ' ', null);
+    check($res['status'] === 'ignored' && $calls === 0, 'без флага ai ИИ не вызывается — работают только жёсткие правила');
+    \App\Signals::$aiExtractor = null;
+    check(\App\Signals::aiParse($post) === null, 'без ключа Anthropic ИИ-разбор молча не применяется');
+    DB::q("DELETE FROM signals WHERE channel_id = ?", [$ch['id']]);
+    DB::q('DELETE FROM signal_channels WHERE id = ?', [$ch['id']]);
+});
+
 test('исполнение по каналам: режим канала, множитель риска, обновления безубыток/закрыть, сделка привязана к сигналу', function () {
     Settings::save(['signal_enabled' => true, 'signal_real_enabled' => true, 'signal_max_chase_pct' => 0.3]);
     $avax = new Instrument('AVAXUSDT', '0.01', '0.1', 0.1, 10000, 5, 50);

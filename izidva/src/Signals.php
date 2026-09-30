@@ -96,6 +96,67 @@ final class Signals
         return true;
     }
 
+    /** Подмена ИИ-экстрактора (тесты). */
+    public static ?\Closure $aiExtractor = null;
+    private const AI_MAX_PER_HOUR = 60;
+
+    /**
+     * ИИ-разбор поста, который не подошёл строгому шаблону. ИИ только ПЕРЕПИСЫВАЕТ поля — каждое число и монета обязаны
+     * буквально присутствовать в тексте, а итог проходит те же проверки (SignalParser::validate), что и обычный сигнал.
+     * @return array{type:string,signal?:array,update?:array,error?:string}|null null — ИИ не применялся или ничего не нашёл
+     */
+    public static function aiParse(string $text): ?array
+    {
+        if (mb_strlen($text) < 15 || mb_strlen($text) > 3000 || !preg_match('/\d/', $text)) {
+            return null;                                       // болтовня без цифр — не тратим токены
+        }
+        if ((int)DB::val("SELECT COUNT(*) FROM ai_usage WHERE kind = 'signal_parse' AND ts > ?", [gmdate('Y-m-d H:i:s', time() - 3600)]) >= self::AI_MAX_PER_HOUR) {
+            return null;                                       // защита от потока постов: лимит расходов на ИИ
+        }
+        $raw = self::$aiExtractor ? (self::$aiExtractor)($text) : (new Engine\AIAnalyst())->extractSignal($text);
+        return is_array($raw) ? self::verifyAi($raw, $text) : null;
+    }
+
+    /** Сверка ответа ИИ с исходным текстом (защита от выдуманных цифр) и приведение к формату SignalParser. */
+    public static function verifyAi(array $r, string $text): ?array
+    {
+        $type = (string)($r['type'] ?? 'none');
+        $coin = strtoupper(preg_replace('/USDT$/i', '', trim((string)($r['symbol'] ?? ''))));
+        if (!in_array($type, ['signal', 'update'], true) || !preg_match('/^[A-Z0-9]{2,15}$/', $coin)
+            || !preg_match('/(?<![A-Za-z0-9])' . preg_quote($coin, '/') . '(?![A-Za-z0-9])/i', $text)) {
+            return null;
+        }
+        $symbol = $coin . 'USDT';
+        if ($type === 'update') {
+            $a = (string)($r['action'] ?? 'none');
+            return in_array($a, ['close', 'breakeven'], true) ? ['type' => 'update', 'update' => ['symbol' => $symbol, 'action' => $a]] : null;
+        }
+        preg_match_all('/\d+(?:[.,]\d+)?/', $text, $m);
+        $nums = array_map(fn($x) => (float)str_replace(',', '.', $x), $m[0]);
+        $present = function (float $v) use ($nums): bool {
+            foreach ($nums as $n) {
+                if (abs($n - $v) <= 1e-9 + abs($v) * 1e-9) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        $side = $r['side'] ?? '';
+        $targets = array_values(array_map('floatval', (array)($r['targets'] ?? [])));
+        $vals = [(float)($r['entry_lo'] ?? 0), (float)($r['entry_hi'] ?? 0), (float)($r['stop'] ?? 0), ...$targets];
+        if (!in_array($side, ['Buy', 'Sell'], true)) {
+            return null;
+        }
+        foreach ($vals as $v) {
+            if ($v <= 0 || !$present($v)) {
+                return ['type' => 'signal', 'error' => 'ИИ вернул число, которого нет в тексте (' . $v . ') — отклонено'];
+            }
+        }
+        $s = ['symbol' => $symbol, 'side' => $side, 'entry_lo' => min($vals[0], $vals[1]), 'entry_hi' => max($vals[0], $vals[1]),
+            'stop' => $vals[2], 'targets' => $targets, 'leverage' => null];
+        return ['type' => 'signal', 'signal' => $s];
+    }
+
     private static function touch(int $id): void
     {
         DB::q('UPDATE signal_channels SET posts_seen = posts_seen + 1, last_post_at = ? WHERE id = ?', [DB::now(), $id]);
@@ -117,8 +178,30 @@ final class Signals
         $base = ['channel_id' => (int)$ch['id'], 'raw_text' => mb_substr($text, 0, 2000), 'source' => $source !== '' ? $source : 'channel:' . $ch['source_key'],
             'reply_chat' => $reply, 'created_at' => DB::now()];
         $s = SignalParser::parse($text, $cfg);
+        $u = null;
+        $viaAi = false;
         if ($s === null) {
             $u = SignalParser::parseUpdate($text, $cfg);
+            if ($u === null && !empty($cfg['ai'])) {
+                $ai = self::aiParse($text);
+                if ($ai && isset($ai['signal'])) {
+                    $s = $ai['signal'];
+                    $viaAi = true;
+                } elseif ($ai && isset($ai['update'])) {
+                    $u = $ai['update'];
+                    $viaAi = true;
+                } elseif ($ai && isset($ai['error'])) {
+                    DB::insert('signals', $base + ['symbol' => '?', 'side' => '', 'entry_lo' => 0, 'entry_hi' => 0, 'stop_loss' => 0, 'targets' => [],
+                        'status' => 'rejected', 'summary' => $ai['error']]);
+                    $say('⚠️ ' . $ai['error']);
+                    return ['status' => 'rejected', 'id' => null, 'message' => $ai['error']];
+                }
+            }
+        }
+        if ($viaAi) {
+            $base['source'] = mb_substr($base['source'], 0, 60) . '+ai';
+        }
+        if ($s === null) {
             if ($u !== null) {
                 $id = DB::insert('signals', $base + ['symbol' => $u['symbol'], 'side' => '', 'entry_lo' => 0, 'entry_hi' => 0, 'stop_loss' => 0, 'targets' => [],
                     'kind' => 'update', 'action' => $u['action'], 'status' => 'new']);

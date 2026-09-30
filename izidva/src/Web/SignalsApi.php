@@ -74,6 +74,19 @@ final class SignalsApi
         if ($upd !== null) {
             return ['type' => 'update', 'ok' => true, 'error' => null, 'update' => $upd];
         }
+        if (!empty($cfg['ai'])) {
+            $ai = Signals::aiParse($text);
+            if ($ai && isset($ai['signal'])) {
+                $err = SignalParser::validate($ai['signal']);
+                return ['type' => 'signal', 'ok' => $err === null, 'error' => $err, 'signal' => $ai['signal'], 'via' => 'ai'];
+            }
+            if ($ai && isset($ai['update'])) {
+                return ['type' => 'update', 'ok' => true, 'error' => null, 'update' => $ai['update'], 'via' => 'ai'];
+            }
+            if ($ai && isset($ai['error'])) {
+                return ['type' => 'none', 'ok' => false, 'error' => $ai['error'], 'symbol' => null, 'via' => 'ai'];
+            }
+        }
         return ['type' => 'none', 'ok' => false, 'error' => 'не похоже ни на сигнал, ни на обновление', 'symbol' => SignalParser::findSymbol($text, $cfg)];
     }
 
@@ -88,6 +101,9 @@ final class SignalsApi
             if ($v !== '') {
                 $out[$k] = mb_substr($v, 0, 300);
             }
+        }
+        if (!empty($raw['ai'])) {
+            $out['ai'] = 1;
         }
         if (in_array($raw['symbol_style'] ?? '', ['hash', 'any'], true) && $raw['symbol_style'] !== 'hash') {
             $out['symbol_style'] = 'any';
