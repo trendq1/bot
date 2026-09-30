@@ -1737,12 +1737,13 @@ test('SignalParser: слова канала настраиваются; обно
 });
 
 test('SignalParser: формат «LDO LONG / цена входа - a-b / цели - a, b, c / стоп - x» (тире вместо двоеточий, список целей)', function () {
+    $cfg = ['symbol_style' => 'any', 'stop_words' => 'стоп'];   // как в настройках канала: слово «стоп» без «лосс»
     $post = "❗️ СИГНАЛ\n\n💭 LDO LONG 📈\n\nплечо - 25 кросс\nцена входа - 0.4871-0.4783$\nцели - 0.4930, 0.5037, 0.5281\nстоп - 0.4553";
     check(SignalParser::parse($post) === null, 'без стиля «any» монета «LDO LONG» не берётся (строгий режим)');
-    $p = SignalParser::parse($post, ['symbol_style' => 'any']);
+    $p = SignalParser::parse($post, $cfg);
     check($p && $p['symbol'] === 'LDOUSDT' && $p['side'] === 'Buy' && near($p['entry_lo'], 0.4783) && near($p['entry_hi'], 0.4871) && near($p['stop'], 0.4553), 'монета, сторона, обращённый диапазон входа, стоп после тире');
     check($p && count($p['targets']) === 3 && near($p['targets'][2], 0.5281) && SignalParser::validate($p) === null, 'три цели списком через запятую, сигнал проходит проверки');
-    $short = SignalParser::parse("BTC SHORT\nвход: 100000\nтейк 99000, 98000\nстоп 101000", ['symbol_style' => 'any']);
+    $short = SignalParser::parse("BTC SHORT\nвход: 100000\nтейк 99000, 98000\nстоп 101000", $cfg);
     check($short && $short['side'] === 'Sell' && $short['symbol'] === 'BTCUSDT' && $short['targets'] === [99000.0, 98000.0], 'то же для шорта; старый формат с «$119.4» по-прежнему работает (см. тесты выше)');
     check(SignalParser::findSymbol('BUY LONG сейчас', ['symbol_style' => 'any']) === null, 'служебное слово BUY монетой не считается');
 });
